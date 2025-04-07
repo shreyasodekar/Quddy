@@ -45,7 +45,7 @@ for x in tqdm(range(len(x_pts))):
 # Plot results.
 fig = plt.figure(figsize=(16,6))
 plt.subplot(121,title="Chevron Plot", xlabel="Frequency (MHz)", ylabel="Pulse length (clock ticks)")
-pc = plt.pcolormesh(x_pts, y_pts, data.realS)
+pc = plt.pcolormesh(x_pts, y_pts, data.real)
 fig.colorbar(pc)
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
 plt.savefig(path+'/'+filename.strip('.h5')+'.png')
