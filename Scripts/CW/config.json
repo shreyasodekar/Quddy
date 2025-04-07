@@ -1,0 +1,18 @@
+{"Sample Name": "Gatemon_v3.3_2-2",
+ "Device Name": "Q4", 
+ "pna" : {
+        "power": -10,
+        "if_bandwidth": 3e3,
+        "averages" : 40
+        },
+
+ "mxg" : {
+        "power":15
+        },
+        
+ "V_gate":  {"1": 0,
+             "2": 0,
+             "3": 0,
+             "4": 0,
+             "5": 0,
+             "6": 0}}

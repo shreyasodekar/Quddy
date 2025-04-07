@@ -1,0 +1,80 @@
+# Open the Config file
+with open(r'C:\Users\frolovlab\Documents\Python Scripts\msmt\CW\config.json','r+') as f:
+    config = json.load(f)
+config['Timestamp'] = datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')
+
+path = os.path.abspath('./Data') + '/CW/' + str(config['Device Name'])
+expname = 'C2_1_Two_tone_powerdep'
+filename = get_unique_filename(path,expname, '.h5')
+config['Expt ID'] = filename.strip('.h5')
+
+expt_cfg = {'resonator_frequency': 8.157695e9,
+            'f_start': 8.5e9,
+            'f_stop': 8.75e9,
+            'f_points': 100,
+            'p_start': -20,
+            'p_stop': 5,
+            'p_points' : 20
+            }
+
+x_pts = np.linspace(expt_cfg['f_start'],expt_cfg['f_stop'],expt_cfg['f_points'])
+y_pts = np.linspace(expt_cfg['p_start'],expt_cfg['p_stop'],expt_cfg['p_points'])
+
+switch.channels[0].switch(1)
+switch.channels[1].switch(1)
+pna.trace("S21")
+pna.power(config['pna']['power'])
+pna.start(expt_cfg['resonator_frequency'])
+pna.stop(expt_cfg['resonator_frequency'])
+pna.points(100)
+pna.if_bandwidth(config['pna']['if_bandwidth'])
+pna.averages_enabled(True)
+pna.averages(config['pna']['averages'])
+
+meas = Measurement()
+meas.register_parameter(pna.polar)
+
+data = generate_empty_nan_array(len(y_pts), len(x_pts))
+
+# # Save data.
+f = h5py.File(path+'/'+filename, 'a', libver='latest')
+f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
+f.create_dataset('Frequency', data = x_pts)
+f.create_dataset('Power', data = y_pts)
+f.create_dataset('S21', data = data)
+f.swmr_mode = True
+
+for y in tqdm(range(len(y_pts))):
+    mxg.power(y_pts[y])
+    for x in range(len(x_pts)):
+        mxg.rf_output(1)
+        mxg.frequency(x_pts[x])
+        pna.output(1)
+        temp = pna.polar()
+        pna.output(0)
+        mxg.rf_output(0)
+        data[y,x] = np.mean(temp) 
+        f['S21'][:] = data
+        time.sleep(0.5)
+
+pna.sweep_mode("CONT")
+
+# PLot 
+fig = plt.figure(figsize=(16,6))
+plt.subplot(121, title="Two Tone - power dependence", xlabel="Frequency (GHz)", ylabel="MXG output power (dBm)")
+plt.pcolormesh(x_pts/1e9, y_pts ,10*np.log10(np.abs(data)))
+plt.colorbar()
+fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
+plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.show()
+
+# Save to docx
+savedoc = input('Save to Doc file? [y]/n : ')
+if savedoc == 'y' or savedoc == '':
+    picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
+    picture.Width = 500 #648 
+    picture.Height = 187.5 #243 
+    word.Selection.TypeText("\n")
+doc.Save()
+
+f.close()

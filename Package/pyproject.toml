@@ -1,0 +1,32 @@
+[project]
+name = "Quddy"
+version = "0.1"
+authors = [
+  	{name="Shreyas Asodekar", email="shreyasodekar@gmail.com" },
+]
+description = "A buddy for your nanowire transmon qubit measurements"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+	"Programming Language :: Python :: 3",
+    	"Operating System :: OS Independent",
+	"License :: OSI Approved :: MIT License"
+]
+keywords = ["RFSOC", "Qubit","measurement","transmon"]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "numpy==1.21.5",
+	"scipy==1.10.0",
+	"matplotlib==3.5.1",
+	"h5py==3.11.0",
+	"pyro4==4.82",
+	"qick==0.2.262",
+	"simplejson==3.19.2",
+	"tqdm==4.66.4",
+	"psutil==6.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/shreyasodekar/Quddy"
+Issues = "https://github.com/shreyasodekar/Quddy/issues"

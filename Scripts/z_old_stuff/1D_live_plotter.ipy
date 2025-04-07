@@ -1,0 +1,84 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Nov  9 13:24:26 2024
+Use this script to Live plot from a hdf5 file 
+I made this as an example of how it can be done. 
+Make sure the keys and the value dimensions are correct.
+
+Enter -1 for the latest or currently running script.
+@author: Shreyas
+"""
+import sys
+import os
+import json
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.widgets import Slider
+import h5py
+
+directory = r'C:\Users\frolovlab\Documents\Python Scripts\Data\2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1'
+os.chdir(directory)
+path = './Data/'
+
+expname = 'E2_Two_tone'
+# expname = 'E1_single_tone_spectroscopy'
+# expname = 'E3_Pulse_probe_spectroscopy'
+# expname = 'E4_length_rabi'
+# expname = 'E5_Amplitude_rabi'
+# expname = 'E6_T1'
+# expname = 'E7_T2Ramsey'
+# expname = 'T2Echo'
+
+expnumber = input("Enter Experiment number:")
+
+try:
+    num = int(expnumber)
+except ValueError:
+    print("Invalid input. Please enter an integer.")
+    sys.exit()
+
+def get_last_expnumber(path,base_name,extension):
+    counter = 0
+    filename = str(base_name)+str(extension)
+    while os.path.exists(path+'/'+filename):
+        counter += 1
+        filename = str(base_name)+"_"+str(counter)+str(extension)
+    return counter-1
+
+latest = get_last_expnumber(path,expname, '.h5')
+if int(expnumber) == -1:
+    expnumber = str(latest)
+    filename = expname+'_'+expnumber
+    if int(expnumber) == 0:
+        filename = expname
+elif int(expnumber) == 0:
+    filename = expname
+elif int(expnumber) > latest or int(expnumber) < -1:
+    print("Invalid Experiment number")
+    sys.exit()
+else:
+    filename = expname+'_'+expnumber
+
+f = h5py.File(path+filename+'.h5','r', libver = 'latest', swmr = True)
+xs = f['Frequency'][:]  # Use the proper of the keys according
+metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+%matplotlib qt5
+fig = plt.figure(figsize = (8,6))
+fig.suptitle(filename, fontsize = 16)
+ax1 = fig.add_subplot(1,1,1)
+# fig.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+
+def animate(i):
+    zs = f['S21'][:]
+    ax1.clear()
+    ax1.plot(xs, 10*np.log10(np.abs(zs)))
+    # ax1.plot(xs, zs.imag)
+    # ax1.plot(xs, zs.real)
+    # ax1.plot(xs,np.abs(zs))
+    ax1.set_xlabel('Frequency')
+    ax1.set_ylabel('|S21| (dB)')
+    ax1.set_xlim([xs[0], xs[-1]])
+
+ani = animation.FuncAnimation(fig, animate, interval=100, cache_frame_data=False)
+plt.show()

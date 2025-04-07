@@ -1,0 +1,118 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Nov  9 13:24:26 2024
+Use this script to Live plot from a hdf5 file 
+I made this as an example of how it can be done. 
+Make sure the keys and the value dimensions are correct.
+
+Enter -1 for the latest or currently running script.
+@author: Shreyas
+"""
+import sys
+import os
+import json
+import numpy as np
+
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.widgets import Slider
+import h5py
+
+directory = r'C:\Users\frolovlab\Documents\Python Scripts\Data\2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1'
+os.chdir(directory)
+path = './Data/'
+
+expname = 'E1_1_Single_tone_powerdep'
+# expname = 'E1_2_Single_tone_gatedep'
+# expname = 'E2_1_Two_tone_powerdep' # change names for these and uncomment
+# expname = 'E2_1_Two_tone_gatedep'
+
+# expname =  'E1_1_single_tone_powerdep'
+# expname =  'E3_1_Pulse_probe_powerdep'
+# expname = 'E4_1_Chevron'
+# expname = 'E5_1_2dRabi'
+
+expnumber = input("Enter Experiment number:")
+
+try:
+    num = int(expnumber)
+except ValueError:
+    print("Invalid input. Please enter an integer.")
+    sys.exit()
+
+def get_last_expnumber(path,base_name,extension):
+    counter = 0
+    filename = str(base_name)+str(extension)
+    while os.path.exists(path+'/'+filename):
+        counter += 1
+        filename = str(base_name)+"_"+str(counter)+str(extension)
+    return counter-1
+
+latest = get_last_expnumber(path,expname, '.h5')
+if int(expnumber) == -1:
+    expnumber = str(latest)
+    filename = expname+'_'+expnumber
+    if int(expnumber) == 0:
+        filename = expname
+elif int(expnumber) == 0:
+    filename = expname
+elif int(expnumber) > latest or int(expnumber) < -1:
+    print("Invalid Experiment number")
+    sys.exit()
+else:
+    filename = expname+'_'+expnumber
+
+f = h5py.File(path+filename+'.h5','r', libver = 'latest', swmr = True)
+xs = f['Frequency'][:]  # Use the proper of the keys according
+ys = f['Power'][:]
+zs = 10*np.log10(np.abs(f['S21'][:]))
+metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+%matplotlib qt5
+fig = plt.figure(figsize = (16,12))
+fig.suptitle(filename, fontsize = 16)
+ax1 = fig.add_subplot(2,2,1)
+ax2 = fig.add_subplot(2,2,2)
+ax3 = fig.add_subplot(2,2,3)
+plt.subplots_adjust(bottom=0.2)
+ys_slider = plt.axes([0.5, 0.574, 0.01, 0.305])
+xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
+fig.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+
+slider1 = Slider(ys_slider, 'Power (DAC units)', valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
+slider2 = Slider(xs_slider, 'Pulse Length (us)', valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
+
+def animate(i):
+    zs = 10*np.log10(np.abs(f['S21'][:]))   #Amplitude
+    # zs = np.angle(f['S21'][:])   #Phase
+    # zs = np.abs(f['S21'][:])
+    # zs = f['S21'][:].imag
+    ax1.clear()
+    ax2.clear()
+    ax3.clear()
+    slider1.valtext.set_text(f'{ys[slider1.val]:.2f}')
+    slider2.valtext.set_text(f'{xs[slider2.val]:.2e}')
+    ax1.pcolormesh(xs, ys, zs)
+    ax1.set_xlabel('Frequency')
+    # ax1.set_ylabel('V_g (mV)')
+    ax1.set_ylabel('MXG Output (dBm)')
+    ax1.axhline(ys[slider1.val], color = 'r', lw=1, alpha = 0.75)
+    ax1.axvline(xs[slider2.val], color = 'b', lw=1, alpha = 0.75)
+    ax2.plot(xs, zs[slider1.val].T)
+    ax2.set_xlim([xs[0],xs[-1]])
+    ax2.set_xlabel('Frequency')
+    ax2.set_ylabel('|S21| (dB)')
+    ax3.plot(ys, zs.T[slider2.val].T)
+    ax3.set_xlim([ys[0],ys[-1]])
+    ax3.set_xlabel('V_g (mV)')
+    ax3.set_ylabel('|S21| (dB)')
+
+ani = animation.FuncAnimation(fig, animate, interval=100, cache_frame_data=False)
+slider1.on_changed(animate)
+slider2.on_changed(animate)
+plt.show()
+
+# from scipy.optimize import curve_fit
+# from FrolovLab_RF import *
+# for i in range(30):
+#     popt, pcov = curve_fit(fitter.lorentzian, xs, zs[i], p0=[xs[np.argmin(zs[i])], -30, -5, 2] )
+#     print([ys[i],popt[0], popt[3]])
