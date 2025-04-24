@@ -15,7 +15,7 @@ to install the package on your Host PC, go to the Package directory and run the 
 ```
 pip install ./
 ```
-One of the dependencies is a package called [resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan). Install this package after installing Quddy.
+You'll also have to install a package called [resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan). Install this package after installing Quddy.
 
 Before running any scripts you need to initialize the pyro4 server on the RFSOC board. To do this, run this script in terminal on your RFSOC baord (easiest way to access the terminal on your board is to use jupyterlab)
 ```
