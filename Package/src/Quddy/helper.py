@@ -1,5 +1,7 @@
 #helper functions
 import os 
+import numpy as np
+import matplotlib.pyplot as plt
 
 def hist(data=None, plot=True, ran=1.0):
     
@@ -81,3 +83,30 @@ def get_unique_filename(path,base_name,extension):
         filename = str(base_name)+"_"+str(counter)+str(extension)
     return filename
         
+def generate_empty_nan_array(x, y):
+    if y == 0:
+        arr = np.zeros(x)+1j*np.zeros(x)
+        arr = arr*np.nan
+    else:    
+        arr = np.zeros((x,y))+1j*np.zeros((x,y))
+        arr = arr*np.nan
+    return arr
+
+def rotate_s21(data):
+    imaginary_parts = np.imag(data)
+    min_imag = np.min(imaginary_parts)
+    max_imag = np.max(imaginary_parts)
+
+    angles = np.linspace(0, 2 * np.pi, 360)
+    variances = [np.var(np.imag(data * np.exp(-1j * angle))) for angle in angles]
+    optimal_angle = angles[np.argmin(variances)]
+
+    rotated_data = data * np.exp(-1j * optimal_angle)
+    new_angle = np.angle(np.mean(rotated_data))
+    if np.pi/2 < np.abs(new_angle)< np.pi:
+        rotated_data = rotated_data*np.exp(1j * np.pi)
+        
+    return rotated_data
+
+def f01estimate(fbare, fr, g):
+    return fbare - g**2 /(fr - fbare)
