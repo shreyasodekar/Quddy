@@ -9,14 +9,13 @@ A single JSON file (config.json) contains all your experimental parameters and a
 ## Installation
 
 For seamlessness make sure you are running the same versions of the python packages on both the RFSOC board and the Host PC. (YES!! Even numpy version matters!!) pyproject.toml includes the dependencies of this package with downgraded versions which support qick==0.2.262. If you have a newer version of qick then you might need to manually check for the verisons of dependencies.
-
-One of the dependencies is a package called [resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan). Install this package first before installing Quddy.
  
 to install the package on your Host PC, go to the Package directory and run the following script in cmd (we reccommend making a new environment for using this package.)
 
 ```
 pip install ./
 ```
+One of the dependencies is a package called [resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan). Install this package after installing Quddy.
 
 Before running any scripts you need to initialize the pyro4 server on the RFSOC board. To do this, run this script in terminal on your RFSOC baord (easiest way to access the terminal on your board is to use jupyterlab)
 ```
