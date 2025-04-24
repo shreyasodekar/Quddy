@@ -22,7 +22,6 @@ dependencies = [
  	"qcodes==0.45.0",
   	"qcodes_contrib_drivers",
   	"lmfit>=0.9.3",
-	"resonator",
  	"pyro4==4.82",
 	"qick==0.2.262",
 	"simplejson==3.19.2",
