@@ -15,11 +15,15 @@ keywords = ["RFSOC", "Qubit","measurement","transmon", "Qick"]
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
 dependencies = [
-    "numpy==1.26.4",
+    	"numpy==1.26.4",
 	"scipy==1.10.0",
 	"matplotlib==3.5.1",
 	"h5py==3.11.0",
-	"pyro4==4.82",
+ 	"qcodes==0.45.0",
+  	"qcodes_contrib_drivers"
+  	"lmfit>=0.9.3",
+	"resonator"
+ 	"pyro4==4.82",
 	"qick==0.2.262",
 	"simplejson==3.19.2",
 	"tqdm==4.66.4",
