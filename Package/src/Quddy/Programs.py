@@ -4,7 +4,7 @@ from qick import *
 class SingleTone(AveragerProgram):
     def initialize(self):
         cfg=self.cfg
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) 	          #Declare generator for readout
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) 	          #Declare generator for readout
 
         #configure the readout lengths and downconversion frequencies
         for ch in cfg['ADCs']: 
@@ -20,7 +20,7 @@ class SingleTone(AveragerProgram):
                                  gain=cfg['resonator']['gain'],
                                  length=cfg['resonator']['pulse_length'])
         
-        self.synci(200)  # give processor some time to configure pulses
+        self.sync_all(self.us2cycles(500))  # give processor some time to configure pulses
     
     def body(self):  
         cfg=self.cfg
@@ -35,9 +35,9 @@ class SingleTone(AveragerProgram):
 class ConstantPulseProbe(AveragerProgram):
     def initialize(self):
         cfg=self.cfg
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) #Readout
+        self.declare_gen(ch=cfg['qubit']['channel'], nqz=cfg['qubit']['nqz']) #Qubit
         
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) #Readout
-        self.declare_gen(ch=cfg['qubit']['channel'], nqz=2) #Qubit
         for ch in cfg['ADCs']: #configure the readout lengths and downconversion frequencies
             self.declare_readout(ch=ch,
                                 length=cfg['readout_length'],
@@ -59,16 +59,13 @@ class ConstantPulseProbe(AveragerProgram):
                                  gain=cfg['resonator']['gain'], 
                                  length=cfg['resonator']['pulse_length'])
         
-        self.sync_all(self.us2cycles(100))
+        self.sync_all(self.us2cycles(500))
     
     def body(self):
         cfg=self.cfg
         self.pulse(ch=self.cfg['qubit']['channel'])  #play probe pulse
 
-        # self.sync_all(self.us2cycles(cfg['qubit']['wait_time'])) # align channels
-        # self.sync_all()
-        self.sync_all(cfg['qubit']['wait_time'])
-        # self.wait_all(cfg['qubit']['wait_time'])
+        self.sync_all(self.us2cycles(cfg['qubit']['wait_time']))
 
         #trigger measurement, play measurement pulse, wait for qubit to relax
         self.measure(pulse_ch=self.cfg['resonator']['channel'], 
@@ -83,8 +80,9 @@ class GaussianPulseProbe(AveragerProgram):
     def initialize(self):
         cfg=self.cfg
         
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) #Readout
-        self.declare_gen(ch=cfg['qubit']['channel'], nqz=2) #Qubit
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) #Readout
+        self.declare_gen(ch=cfg['qubit']['channel'], nqz=cfg['qubit']['nqz']) #Qubit
+        
         for ch in cfg['ADCs']: #configure the readout lengths and downconversion frequencies
             self.declare_readout(ch=ch,
                                 length=cfg['readout_length'],
@@ -95,7 +93,7 @@ class GaussianPulseProbe(AveragerProgram):
         self.add_gauss(ch=cfg['qubit']['channel'], 
                        name="qubit", 
                        sigma=self.us2cycles(cfg['qubit']['sigma']), 
-                       length=self.us2cycles(cfg['qubit']['sigma'])*4)
+                       length=self.us2cycles(cfg['qubit']['sigma'])*3)
         
         self.set_pulse_registers(ch=cfg['qubit']['channel'], 
                                  style="arb", 
@@ -111,13 +109,13 @@ class GaussianPulseProbe(AveragerProgram):
                                  gain=cfg['resonator']['gain'], 
                                  length=cfg['resonator']['pulse_length'])
         
-        self.sync_all(self.us2cycles(100))
+        self.sync_all(self.us2cycles(500))
         
     def body(self):
         cfg=self.cfg
         self.pulse(ch=self.cfg['qubit']['channel'])  #play probe pulse
         
-        self.sync_all(self.us2cycles(cfg['qubit']['wait_time'])) # align channels and wait 50ns
+        self.sync_all(self.us2cycles(cfg['qubit']['wait_time']))
 
         #trigger measurement, play measurement pulse, wait for qubit to relax
         self.measure(pulse_ch=self.cfg['resonator']['channel'], 
@@ -130,8 +128,8 @@ class Ramsey(AveragerProgram):
     def initialize(self):
         cfg=self.cfg
         
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) #Readout
-        self.declare_gen(ch=cfg['qubit']['channel'], nqz=2) #Qubit
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) #Readout
+        self.declare_gen(ch=cfg['qubit']['channel'], nqz=cfg['qubit']['nqz']) #Qubit
         for ch in cfg['ADCs']: #configure the readout lengths and downconversion frequencies
             self.declare_readout(ch=ch,
                                 length=cfg['readout_length'],
@@ -142,7 +140,7 @@ class Ramsey(AveragerProgram):
         self.add_gauss(ch=cfg['qubit']['channel'], 
                        name="qubit", 
                        sigma=self.us2cycles(cfg['qubit']['sigma']), 
-                       length=self.us2cycles(cfg['qubit']['sigma'])*4)
+                       length=self.us2cycles(cfg['qubit']['sigma'])*3)
         
         self.set_pulse_registers(ch=cfg['qubit']['channel'], 
                                  style="arb", 
@@ -162,10 +160,10 @@ class Ramsey(AveragerProgram):
     
     def body(self):
         cfg=self.cfg
-        self.pulse(ch=self.cfg['qubit']['channel'])    #play probe pulse
-        self.sync_all(self.us2cycles(cfg['qubit']['dephase_time'])) # align channels and wait
-        self.pulse(ch=self.cfg['qubit']['channel'])    #play probe pulse
-        self.sync_all(self.us2cycles(cfg['qubit']['sync_time'])) # align channels and wait
+        self.pulse(ch=self.cfg['qubit']['channel'])    #play probe pi/2-pulse
+        self.sync_all(self.us2cycles(cfg['qubit']['dephase_time'])) # 
+        self.pulse(ch=self.cfg['qubit']['channel'])    #play probe pi/2-pulse
+        self.sync_all(self.us2cycles(cfg['qubit']['wait_time'])) # align channels and wait
 
 
         #trigger measurement, play measurement pulse, wait for qubit to relax
@@ -180,8 +178,8 @@ class HahnEcho(AveragerProgram):
     def initialize(self):
         cfg=self.cfg
         
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) #Readout
-        self.declare_gen(ch=cfg['qubit']['channel'], nqz=2) #Qubit
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) #Readout
+        self.declare_gen(ch=cfg['qubit']['channel'], nqz=cfg['qubit']['nqz']) #Qubit
         for ch in cfg['ADCs']: #configure the readout lengths and downconversion frequencies
             self.declare_readout(ch=ch,
                                 length=cfg['readout_length'],
@@ -192,7 +190,7 @@ class HahnEcho(AveragerProgram):
         self.add_gauss(ch=cfg['qubit']['channel'], 
                        name="qubit", 
                        sigma=self.us2cycles(cfg['qubit']['sigma']), 
-                       length=self.us2cycles(cfg['qubit']['sigma'])*4)
+                       length=self.us2cycles(cfg['qubit']['sigma'])*3)
         
         self.default_pulse_registers(ch=cfg['qubit']['channel'], 
                                  style="arb", 
@@ -239,8 +237,8 @@ class SingleShot(RAveragerProgram):
     def initialize(self):
         cfg=self.cfg
         
-        self.declare_gen(ch=cfg['resonator']['channel'], nqz=2) 	#Declare generator for readout
-        self.declare_gen(ch=cfg['qubit']['channel'], nqz=2) 	    #Declare generator for qubit
+        self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz']) 	#Declare generator for readout
+        self.declare_gen(ch=cfg['qubit']['channel'], nqz=cfg['qubit']['nqz']) 	    #Declare generator for qubit
         
         for ch in cfg['ADCs']:       #configure the readout lengths and downconversion frequencies
             self.declare_readout(ch=ch, 
