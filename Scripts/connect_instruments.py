@@ -30,16 +30,17 @@ ivvi = IVVI('ivvi', 'ASRL4::INSTR', numdacs=16, dac_step=10, dac_delay=0.01, saf
 ivvi.set_dacs_zero()
 switch = MiniCircuitsRCSPDT('switch', '192.168.1.141')
 
-# soc, soccfg = make_proxy(ns_host="192.168.1.138", ns_port=8888, proxy_name="rfsoc")
+soc, soccfg = make_proxy(ns_host="192.168.1.138", ns_port=8888, proxy_name="rfsoc")
 
-directory = r'C:\Users\frolovlab\Documents\Python Scripts\Data\2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1'
-os.chdir(directory)
+directory = r'C:\Users\frolovlab\Documents\Python Scripts\Data\'
+expt = '2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1'
+os.chdir(directory + expt)
 print('All instruments connected')
-print('Working Directory: '+directory)
+print('Working Directory: '+ directory + expt)
 
 import win32com.client as win32
 word = win32.Dispatch('Word.Application')
-doc = word.Documents.Open(directory+'/2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1.docx')
+doc = word.Documents.Open(directory + expt + '\' + expt + '.docx')
 word.Selection.GoTo(What=win32.constants.wdGoToLine, Which=win32.constants.wdGoToLast)
 word.Visible = True
 selection = word.Selection
