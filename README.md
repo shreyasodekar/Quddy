@@ -24,4 +24,4 @@ python home/xilinx/jupyter_notebooks/qick/pyro4/pyro_service.py
 
 Leave this terminal running and DO NOT INTERUPT. If this pyro_service.py script doesn't exist on your board by default then just follow the notebooks in the pyro4 directory. (Yes, now you can close the jupyterlab!)
 
-Once you have installed the package and have initialized the pyro4 server on your RFSOC board, you can copy the Scripts direcctory to your prefffered location and run the experiment scripts in order.
+Once you have installed the package and have initialized the pyro4 server on your RFSOC board, copy the Scripts directory to your prefffered location, create a directory specifically for data storage (it can be in a different location). Copy the path to this directory  in the 'directory' variable in connect_instruments.py. Also enter the name of your experiment in 'expt' variable. You might have to double check the intruments that you are using and if you are connecting them with right drivers and their right VISA address. Now you are good to go!
