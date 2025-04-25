@@ -1,5 +1,6 @@
 # Open the Config file
-with open(r'C:\Users\frolovlab\Documents\Python Scripts\msmt\CW\config.json','r+') as f:
+pwd = os.path.dirname(__file__)
+with open(pwd + '\\config.json','r+') as f:
     config = json.load(f)
 config['Timestamp'] = datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')
 
