@@ -110,3 +110,10 @@ def rotate_s21(data):
 
 def f01estimate(fbare, fr, g):
     return fbare - g**2 /(fr - fbare)
+
+def get_fridge_snapshot():
+    # snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
+    #             "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
+    #             "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature()}
+    snapshot = Proteox.snapshot()
+    return snapshot
