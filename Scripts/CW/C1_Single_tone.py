@@ -39,6 +39,7 @@ pna.output(1)
 data = pna.polar()
 pna.output(0)
 # mxg.rf_output(0)
+snapshot = get_fridge_snapshot()
 pna.sweep_mode("CONT")
 
 # Save data.
@@ -46,6 +47,7 @@ f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 # resonator = shunt.LinearShuntFitter(frequency=x_pts, data=data,
