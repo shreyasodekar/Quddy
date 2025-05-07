@@ -18,12 +18,14 @@ prog = Programs.SingleTone(soccfg, config)
 iq_list = prog.acquire_decimated(soc, progress=True)
 data = iq_list[0][0]+1j*iq_list[0][1]
 x_pts = prog.get_time_axis(0)
+snapshot = get_fridge_snapshot()
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Time', data = x_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 # Plot results.
