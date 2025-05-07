@@ -16,12 +16,14 @@ expt_cfg = {'start': 0,
 
 x_pts = np.arange(expt_cfg['start'],expt_cfg['stop'],expt_cfg['step'], dtype = 'float64')
 data = generate_empty_nan_array(len(x_pts),0)
+snapshot = generate_empty_nan_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
     
 x_pts = np.arange(expt_cfg['start'],expt_cfg['stop'],expt_cfg['step'])
@@ -36,6 +38,8 @@ for x in tqdm(range(len(x_pts))):
     avgi, avgq = prog.acquire(soc, progress=False)
     data[x] = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
+    snapshot[x] = get_fridge_snapshot()
+    f['Fridge snapshot'] = snapshot
 
 data = rotate_s21(data)
 popt, pcov = curve_fit(fitter.sinedecay, x_pts, data.real, p0=[0, 0.01, 1, 30, 0])
