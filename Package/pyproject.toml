@@ -21,16 +21,10 @@ dependencies = [
 	"h5py==3.11.0",
  	"qcodes==0.45.0",
   	"qcodes_contrib_drivers",
-  	"lmfit>=0.9.3",
  	"pyro4==4.82",
 	"qick==0.2.262",
 	"simplejson==3.19.2",
-	"tqdm==4.66.4",
-	"psutil==6.0.0",
- 	"ipywidgets==8.1.6",
-  	"jupyter==1.1.1",
-   	"spyder==5.5.5",
-    	"pythonnet"
+	"tqdm==4.66.4"
 ]
 
 [project.urls]
