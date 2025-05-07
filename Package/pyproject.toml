@@ -24,7 +24,8 @@ dependencies = [
  	"pyro4==4.82",
 	"qick==0.2.262",
 	"simplejson==3.19.2",
-	"tqdm==4.66.4"
+	"tqdm==4.66.4",
+ 	"pythonnet"
 ]
 
 [project.urls]
