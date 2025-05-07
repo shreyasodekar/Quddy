@@ -34,7 +34,7 @@ meas = Measurement()
 meas.register_parameter(pna.polar)
 
 data = generate_empty_nan_array(len(y_pts), len(x_pts))
-snapshot = generate_empty_nan_array(len(y_pts))
+snapshot = generate_empty_nan_array(len(y_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
