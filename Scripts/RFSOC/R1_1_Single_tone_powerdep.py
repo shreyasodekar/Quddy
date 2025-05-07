@@ -22,6 +22,7 @@ gain_cfg = {'start': 100,
 x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
 y_pts = np.arange(gain_cfg['start'],gain_cfg['stop'],gain_cfg['step'], dtype = 'float64')
 data = generate_empty_nan_array(len(y_pts),len(x_pts))
+snapshot = generate_empty_nan_array(len(y_pts),len(x_pts))
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -29,6 +30,7 @@ f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('Power', data = y_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
     
 y_pts = np.arange(gain_cfg['start'],gain_cfg['stop'],gain_cfg['step'])
@@ -45,6 +47,8 @@ for y in tqdm(range(len(y_pts))):
         avgi, avgq = prog.acquire(soc, progress=False)
         data[y,x] = avgi[0][0]+1j*avgq[0][0]
         f['S21'][:] = data
+        snapshot[y,x] = get_fridge_snapshot()
+        f['Fridge snapshot'] = snapshot
 
 # Plot results. Need to add fitting functions.
 fig = plt.figure(figsize=(16,6))
