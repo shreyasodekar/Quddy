@@ -16,19 +16,21 @@ expt_cfg = {'start': 8176,
 
 x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
+snapshot = generate_empty_nan_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 switch.channels[0].switch(2)
 switch.channels[1].switch(2)
 # ivvi._set_dac(10, config['V_gate']['2'])
 # ivvi._set_dac(11, config['V_gate']['5'])
-ivvi._set_dac(12, config['V_gate']['4']/5)
+# ivvi._set_dac(12, config['V_gate']['4']/5)
 # ivvi._set_dac(13, config['V_gate']['5'])
 # print('V_g2 = '+str(ivvi._get_dac(10))+ ' mV')
 # time.sleep(1)
@@ -41,6 +43,8 @@ for x in tqdm(range(len(x_pts))):
     avgi, avgq = prog.acquire(soc, progress=False)
     data[x] = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
+    snapshot[x] = get_fridge_snapshot()
+    f['Fridge snapshot'] = snapshot
         
 # popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[x_pts[np.argmin(np.abs(data))], -5, -40, 1] )
 # # popt, pcov = curve_fit(fitter.lorentzian, x_pts, np.abs(data), p0=[x_pts[np.argmin(np.abs(data))], -0.8, -0.2, 2] )
