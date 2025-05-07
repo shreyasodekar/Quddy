@@ -28,12 +28,14 @@ meas = Measurement()
 meas.register_parameter(pna.polar)
 
 data = generate_empty_nan_array(len(x_pts),0)
+snapshot = generate_empty_nan_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('S21', data = data)
+f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 ivvi._set_dac(12,config['V_gate']['4']/5)
@@ -47,7 +49,9 @@ for x in tqdm(range(len(x_pts))):
     data[x] = np.mean(temp)
     f['S21'][:] = data
     mxg.rf_output(0)
-    time.sleep(0.1)    
+    time.sleep(0.1)   
+    snapshot[x] = get_fridge_snapshot()
+    f['Fridge snapshot'] = snapshot
 
 pna.output(0)
 pna.sweep_mode("CONT")
