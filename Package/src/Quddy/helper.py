@@ -112,8 +112,9 @@ def f01estimate(fbare, fr, g):
     return fbare - g**2 /(fr - fbare)
 
 def get_fridge_snapshot():
-    # snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
-    #             "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
-    #             "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature()}
-    snapshot = Proteox.snapshot()
+    snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
+                "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
+                "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature(),
+                "Cold Plate Temperature" : Proteox.Cold_Plate_Temperature(),
+                "Still Plate Temperature" : Proteox.Still_Plate_Temperature()}
     return snapshot
