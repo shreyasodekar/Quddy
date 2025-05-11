@@ -35,14 +35,14 @@ switch = MiniCircuitsRCSPDT('switch', '192.168.1.141')
 soc, soccfg = make_proxy(ns_host="192.168.1.138", ns_port=8888, proxy_name="rfsoc")
 
 directory = 'C:/Users/frolovlab/Documents/Python Scripts/Data/'
-expt = '2025_02_18_TransmonFridge_SnInAs_2x7_ParampV1.1-2_Cooldown1'
+expt = '2025_05_11_TransmonFridge_LL-Candle-qubit_Cooldown1'
 os.chdir(directory + expt)
 print('All instruments connected')
 print('Working Directory: '+ directory + expt)
 
 import win32com.client as win32
 word = win32.Dispatch('Word.Application')
-doc = word.Documents.Open(directory + expt + '/' + expt + '.docx')
-word.Selection.GoTo(What=win32.constants.wdGoToLine, Which=win32.constants.wdGoToLast)
+doc = word.Documents.Open(os.path.abspath('./'+expt + '.docx'))
+word.Selection.GoTo(What=3, Which=-1)
 word.Visible = True
 selection = word.Selection
