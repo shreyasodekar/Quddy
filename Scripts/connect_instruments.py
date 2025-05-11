@@ -11,7 +11,7 @@ from tqdm import tqdm, trange
 import h5py
 from qick import *
 from Quddy import *
-from Quddy.helper import get_unique_filename, generate_empty_nan_array, rotate_s21
+from Quddy.helper import get_unique_filename, generate_empty_nan_array, rotate_s21, get_fridge_snapshot
 from resonator import background, see, shunt
 
 import qcodes as qc
