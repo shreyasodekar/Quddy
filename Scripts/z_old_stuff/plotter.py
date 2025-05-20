@@ -3,7 +3,7 @@ import traceback
 import h5py
 import json
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QComboBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QComboBox, QPushBotton, QFileDialog
 from PyQt5.QtCore import Qt
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
@@ -59,7 +59,7 @@ class Plotter(QMainWindow):
         self.layout.addWidget(self.label)
 
         self.combo_box = QComboBox(self)
-        self.combo_box.setFixedWidth(200)
+        self.combo_box.setFixedWidth(300)
         self.combo_box.addItem("Plot S21 (dB)")
         self.combo_box.addItem("Plot \u2220S21 (deg)")
         self.combo_box.addItem("Plot R[S21]")
@@ -68,6 +68,12 @@ class Plotter(QMainWindow):
         self.combo_box.hide()
         self.layout.addWidget(self.combo_box)
 
+        self.save_button = QPushButton('Save Figure', self)
+        self.save_button.setFixedWidth(200)
+        self.save_button.clicked.connect(self.save_button_click_event)
+        self.save_button.hide()
+        self.layout.addWidget(self.save_button)
+      
         self.figure = plt.figure(figsize = (16,12))
         self.canvas = FigureCanvas(self.figure)
         self.canvas.hide()
@@ -78,6 +84,11 @@ class Plotter(QMainWindow):
         if file_path:
             self.load_and_plot_data(file_path)
 
+    def save_button_click_event(self):
+        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Plot", "", "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg)")
+        if save_path:
+            self.figure.savefig(save_path)
+        
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.accept()
@@ -194,6 +205,7 @@ class Plotter(QMainWindow):
             self.canvas.show()
             self.figure.clear()
             self.combo_box.show()
+            self.save_button.show()
 
             if exptinst == 'CW':
                 if expttype == '1D':    # 1D type plotter
