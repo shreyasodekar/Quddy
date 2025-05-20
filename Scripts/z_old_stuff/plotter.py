@@ -128,12 +128,19 @@ class Plotter(QMainWindow):
                     
                     
                 ################################## 2D Experiments
-                if exptname == 'C1_1_Single_tone_powerdep' or exptname == 'C2_1_Two_tone_powerdep' or exptname == 'R1_1_Single_tone_powerdep' or exptname == 'R2_1_Two_tone_powerdep' or exptname == 'R4_2_Chevron':
+                if exptname == 'C1_1_Single_tone_powerdep' or exptname == 'C2_1_Two_tone_powerdep':
                     expttype = '2D'
                     xs = f['Frequency'][:]/1e9
                     ys = f['Power'][:]
                     ax1_xlabel = 'Frequency (GHz)'
                     ax1_ylabel = 'RF output power (dBm)'
+
+                if exptname == 'R1_1_Single_tone_powerdep' or exptname == 'R2_1_Two_tone_powerdep' or exptname == 'R4_2_Chevron':
+                    expttype = '2D'
+                    xs = f['Frequency'][:]/1e9
+                    ys = f['Power'][:]
+                    ax1_xlabel = 'Frequency (GHz)'
+                    ax1_ylabel = 'Gain (DAC units)'
                     
                 if exptname == 'C1_2_Single_tone_gatedep' or exptname == 'C2_2_Two_tone_gatedep' or exptname == 'R1_2_Single_tone_gatedep' or exptname == 'R2_2_Two_tone_gatedep':
                     expttype = '2D'
@@ -178,7 +185,7 @@ class Plotter(QMainWindow):
                     plot_option = self.combo_box.currentText()
                     ax1.set_xlabel(ax1_xlabel)
                     if plot_option == "Plot S21 (dB)":
-                        zs = 10*np.log10(np.abs(f['S21'][:]))
+                        zs = 20*np.log10(np.abs(f['S21'][:]))
                         ax1.set_ylabel('S21 (dBm)')
                     elif plot_option == "Plot \u2220S21 (deg)":
                         zs = np.angle(f['S21'][:], deg=True)
@@ -205,8 +212,8 @@ class Plotter(QMainWindow):
                 xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
                 self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
                 
-                slider1 = Slider(ys_slider, 'Power (DAC units)', valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
-                slider2 = Slider(xs_slider, 'Pulse Length (us)', valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
+                slider1 = Slider(ys_slider, ax1_ylabel, valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
+                slider2 = Slider(xs_slider, ax1_xlabel, valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
         
                 def animate(i):
                     ax1.clear()
@@ -218,7 +225,7 @@ class Plotter(QMainWindow):
                     ax2.set_xlabel(ax1_xlabel)
                     ax3.set_xlabel(ax1_ylabel)
                     if plot_option == "Plot S21 (dB)":
-                        zs = 10*np.log10(np.abs(f['S21'][:]))
+                        zs = 20*np.log10(np.abs(f['S21'][:]))
                         ax2.set_ylabel('S21 (dB)')
                         ax3.set_ylabel('S21 (dB)')
                     elif plot_option == "Plot \u2220S21 (deg)":
