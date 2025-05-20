@@ -294,7 +294,7 @@ class Plotter(QMainWindow):
                     slider2.on_changed(animate)
             
             
-            elif exptinst = 'RFSOC':
+            elif exptinst == 'RFSOC':
                 if expttype == '1D':    # 1D type plotter
                     self.resize(1600, 600)
                     self.figure.set_size_inches(16, 6)
