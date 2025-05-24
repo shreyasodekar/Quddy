@@ -16,7 +16,7 @@ expt_cfg = {'start': 0.002,
 
 x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
-snapshot = generate_empty_nan_array(len(x_pts),0)
+snapshot = generate_empty_snapshot_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -37,7 +37,7 @@ for x in tqdm(range(len(x_pts))):
     avgi, avgq = prog.acquire(soc, progress=False)
     data[x] = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
-    snapshot[x] = get_fridge_snapshot()
+    snapshot[x] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
 
 data = rotate_s21(data)

@@ -39,7 +39,7 @@ pna.output(1)
 data = pna.polar()
 pna.output(0)
 # mxg.rf_output(0)
-snapshot = get_fridge_snapshot()
+snapshot = get_fridge_snapshot(Proteox)
 pna.sweep_mode("CONT")
 
 # Save data.

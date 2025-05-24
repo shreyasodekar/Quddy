@@ -18,7 +18,7 @@ prog = Programs.SingleTone(soccfg, config)
 iq_list = prog.acquire_decimated(soc, progress=True)
 data = iq_list[0][0]+1j*iq_list[0][1]
 x_pts = prog.get_time_axis(0)
-snapshot = get_fridge_snapshot()
+snapshot = get_fridge_snapshot(Proteox)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')

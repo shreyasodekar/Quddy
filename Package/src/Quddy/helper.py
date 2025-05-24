@@ -92,6 +92,30 @@ def generate_empty_nan_array(x, y):
         arr = arr*np.nan
     return arr
 
+nan_snapshot = {"MC Temperature" : np.nan,
+            "Magnetic Field Vector" : np.nan,
+            "PT2 Plate Temperature" : np.nan,
+            "Cold Plate Temperature" : np.nan,
+            "Still Plate Temperature" : np.nan}
+
+
+def generate_empty_snapshot_array(x, y):
+    if y == 0:
+        arr = [nan_snapshot for i in range(x)]
+        arr = np.array(arr, dtype=object)
+    else:    
+        arr = [[None for j in range(y)] for i in range(x)]
+        arr = np.array(arr, dtype=object)
+    return arr
+
+def get_fridge_snapshot(Proteox):
+    snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
+                "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
+                "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature(),
+                "Cold Plate Temperature" : Proteox.Cold_Plate_Temperature(),
+                "Still Plate Temperature" : Proteox.Still_Plate_Temperature()}
+    return snapshot
+
 def rotate_s21(data):
     imaginary_parts = np.imag(data)
     min_imag = np.min(imaginary_parts)
@@ -110,11 +134,3 @@ def rotate_s21(data):
 
 def f01estimate(fbare, fr, g):
     return fbare - g**2 /(fr - fbare)
-
-def get_fridge_snapshot():
-    snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
-                "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
-                "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature(),
-                "Cold Plate Temperature" : Proteox.Cold_Plate_Temperature(),
-                "Still Plate Temperature" : Proteox.Still_Plate_Temperature()}
-    return snapshot

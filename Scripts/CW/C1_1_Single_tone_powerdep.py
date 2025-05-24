@@ -34,7 +34,7 @@ meas = Measurement()
 meas.register_parameter(pna.polar)
 
 data = generate_empty_nan_array(len(y_pts), len(x_pts))
-snapshot = generate_empty_nan_array(len(y_pts),0)
+snapshot = generate_empty_snapshot_array(len(y_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -53,7 +53,7 @@ for y in tqdm(range(len(y_pts))):
     data[y] = temp
     f['S21'][:] = data
     pna.output(0)
-    snapshot[y] = get_fridge_snapshot()
+    snapshot[y] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
 
 pna.sweep_mode("CONT")

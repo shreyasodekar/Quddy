@@ -16,7 +16,7 @@ expt_cfg = {'start': 8176,
 
 x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
-snapshot = generate_empty_nan_array(len(x_pts),0)
+snapshot = generate_empty_snapshot_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -43,7 +43,7 @@ for x in tqdm(range(len(x_pts))):
     avgi, avgq = prog.acquire(soc, progress=False)
     data[x] = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
-    snapshot[x] = get_fridge_snapshot()
+    snapshot[x] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
         
 # popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[x_pts[np.argmin(np.abs(data))], -5, -40, 1] )

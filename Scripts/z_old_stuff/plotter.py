@@ -1,14 +1,18 @@
 import sys
+import os
 import traceback
 import h5py
 import json
+import time
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QWidget, QComboBox, QPushBotton, QFileDialog
+from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QWidget, QComboBox, QPushButton, QFileDialog
+from PyQt5.QtGui import QClipboard, QPixmap
 from PyQt5.QtCore import Qt
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 import matplotlib.animation as animation
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import win32com.client as win32
 
 all_expts = [#old experiment names
              'E1_1_Single_tone_powerdep',
@@ -51,8 +55,10 @@ class Plotter(QMainWindow):
 
         self.centralWidget = QWidget(self)
         self.setCentralWidget(self.centralWidget)
-
         self.layout = QVBoxLayout(self.centralWidget)
+        
+        hbox = QHBoxLayout()
+        
         self.label = QLabel("Drag and drop your HDF5 file here", self)
         self.label.setAlignment(Qt.AlignCenter)
         self.label.setStyleSheet("border: 2px dashed #aaa; padding: 20px; font-size: 28px;")
@@ -60,34 +66,72 @@ class Plotter(QMainWindow):
 
         self.combo_box = QComboBox(self)
         self.combo_box.setFixedWidth(300)
-        self.combo_box.addItem("Plot S21 (dB)")
-        self.combo_box.addItem("Plot \u2220S21 (deg)")
-        self.combo_box.addItem("Plot R[S21]")
-        self.combo_box.addItem("Plot I[S21]")
-        self.combo_box.setCurrentIndex(0)
         self.combo_box.hide()
-        self.layout.addWidget(self.combo_box)
+        hbox.addWidget(self.combo_box)
+        hbox.addStretch() 
+        
+        self.copy_button = QPushButton('Copy Figure', self)
+        self.copy_button.setFixedWidth(200)
+        self.copy_button.clicked.connect(self.copy2clipboard)
+        self.copy_button.hide()
+        hbox.addWidget(self.copy_button)
 
+        self.word_button = QPushButton('Send to docx', self)
+        self.word_button.setFixedWidth(200)
+        self.word_button.clicked.connect(self.copy2word)
+        self.word_button.hide()
+        hbox.addWidget(self.word_button)
+        
         self.save_button = QPushButton('Save Figure', self)
         self.save_button.setFixedWidth(200)
         self.save_button.clicked.connect(self.save_button_click_event)
         self.save_button.hide()
-        self.layout.addWidget(self.save_button)
-      
+        hbox.addWidget(self.save_button)
+        
+        self.layout.addLayout(hbox)
+        
         self.figure = plt.figure(figsize = (16,12))
         self.canvas = FigureCanvas(self.figure)
         self.canvas.hide()
         self.layout.addWidget(self.canvas)
-
+        
         self.setAcceptDrops(True)
         self.anim = None
         if file_path:
             self.load_and_plot_data(file_path)
 
     def save_button_click_event(self):
-        save_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save Plot", "", "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg)")
+        save_path, _ = QFileDialog.getSaveFileName(self, "Save Plot", "", "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg)")
         if save_path:
             self.figure.savefig(save_path)
+            
+    def copy2clipboard(self):
+        temp_file = 'temp.png'
+        self.figure.savefig(temp_file)
+            
+        clipboard = QApplication.clipboard()
+        pixmap = QPixmap(temp_file)
+        clipboard.setPixmap(pixmap, QClipboard.Clipboard)
+        
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+    def copy2word(self):
+        temp_file = 'temp.png'
+        self.figure.savefig(temp_file)
+            
+        word = win32.Dispatch('Word.Application')
+        doc = word.ActiveDocument
+        word.Selection.GoTo(What=3, Which=-1)
+        word.Visible = True
+        selection = word.Selection
+        picture = selection.InlineShapes.AddPicture(os.path.abspath(temp_file))
+        picture.Width = 500 #648 
+        picture.Height = 187.5 #243 
+        doc.Save()
+        
+        if os.path.exists(temp_file):
+            os.remove(temp_file)    
         
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -206,179 +250,205 @@ class Plotter(QMainWindow):
             self.figure.clear()
             self.combo_box.show()
             self.save_button.show()
+            self.copy_button.show()
+            self.word_button.show()
+            
+            if exptinst == 'CW' and expttype == '1D':
+                self.combo_box.clear()
+                self.combo_box.addItem("Plot S21 (dB)")
+                self.combo_box.addItem("Plot \u2220S21 (deg)")
+                self.combo_box.addItem("Plot R[S21]")
+                self.combo_box.addItem("Plot I[S21]")
+                self.combo_box.setCurrentIndex(0)
+                self.resize(1200, 600)
+                self.figure.set_size_inches(16, 6)
+                self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
+                ax1 = self.figure.add_subplot(121)
+                plt.subplots_adjust(bottom=0.2)
+                self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+                
+                def animate(i):
+                    ax1.clear()
+                    plot_option = self.combo_box.currentIndex()
+                    ax1.set_xlabel(ax1_xlabel)
+                    if plot_option == 0:
+                        zs = 20*np.log10(np.abs(f['S21'][:]))
+                        ax1.set_ylabel('S21 (dBm)')
+                    elif plot_option == 1:
+                        zs = np.angle(f['S21'][:], deg=True)
+                        ax1.set_ylabel('\u2220S21 (deg)')
+                    elif plot_option == 2:
+                        zs = np.real(f['S21'][:])
+                        ax1.set_ylabel('R[S21]')
+                    elif plot_option == 3:
+                        zs = np.imag(f['S21'][:])
+                        ax1.set_ylabel('I[S21]')
+                        
+                    ax1.plot(xs, zs)
+                    ax1.set_xlim([xs[0], xs[-1]])
+                
+                self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
+    
+            if exptinst == 'CW' and expttype == '2D':
+                self.combo_box.clear()
+                self.combo_box.addItem("Plot S21 (dB)")
+                self.combo_box.addItem("Plot \u2220S21 (deg)")
+                self.combo_box.addItem("Plot R[S21]")
+                self.combo_box.addItem("Plot I[S21]")
+                self.combo_box.setCurrentIndex(0)
+                self.resize(1600,1200)
+                self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
+                ax1 = self.figure.add_subplot(221)
+                ax2 = self.figure.add_subplot(222)
+                ax3 = self.figure.add_subplot(223)
+                plt.subplots_adjust(bottom=0.2)
+                ys_slider = plt.axes([0.95, 0.574, 0.01, 0.305])
+                xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
+                self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+                
+                slider1 = Slider(ys_slider, ax1_ylabel, valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
+                slider2 = Slider(xs_slider, ax1_xlabel, valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
+        
+                def animate(i):
+                    ax1.clear()
+                    ax2.clear()
+                    ax3.clear()
+                    plot_option = self.combo_box.currentIndex()
+                    ax1.set_xlabel(ax1_xlabel)
+                    ax1.set_ylabel(ax1_ylabel)
+                    ax2.set_xlabel(ax1_xlabel)
+                    ax3.set_xlabel(ax1_ylabel)
+                    if plot_option == 0:
+                        zs = 20*np.log10(np.abs(f['S21'][:]))
+                        ax2.set_ylabel('S21 (dB)')
+                        ax3.set_ylabel('S21 (dB)')
+                    elif plot_option == 1:
+                        zs = np.angle(f['S21'][:], deg=True)
+                        ax2.set_ylabel('\u2220S21 (deg)')
+                        ax3.set_ylabel('\u2220S21 (deg)')
+                    elif plot_option == 2:
+                        zs = np.real(f['S21'][:])
+                        ax2.set_ylabel('R[S21]')
+                        ax3.set_ylabel('R[S21]')
+                    elif plot_option == 3:
+                        zs = np.imag(f['S21'][:])
+                        ax2.set_ylabel('I[S21]')
+                        ax3.set_ylabel('I[S21]')
+        
+                    
+                    slider1.valtext.set_text(f'{ys[slider1.val]:.2f}')
+                    slider2.valtext.set_text(f'{xs[slider2.val]:.2e}')
+                    ax1.pcolormesh(xs, ys, zs)
+                    ax1.axhline(ys[slider1.val], color = 'r', lw=1, alpha = 0.75)
+                    ax1.axvline(xs[slider2.val], color = 'b', lw=1, alpha = 0.75)
+                    ax2.plot(xs, zs[slider1.val].T)
+                    ax2.set_xlim([xs[0],xs[-1]])
+                    ax3.plot(ys, zs.T[slider2.val].T)
+                    ax3.set_xlim([ys[0],ys[-1]])
 
-            if exptinst == 'CW':
-                if expttype == '1D':    # 1D type plotter
-                    self.resize(1600, 600)
-                    self.figure.set_size_inches(16, 6)
-                    self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
-                    ax1 = self.figure.add_subplot(121)
-                    plt.subplots_adjust(bottom=0.2)
-                    self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
                     
-                    def animate(i):
-                        ax1.clear()
-                        plot_option = self.combo_box.currentText()
-                        ax1.set_xlabel(ax1_xlabel)
-                        if plot_option == "Plot S21 (dB)":
-                            zs = 20*np.log10(np.abs(f['S21'][:]))
-                            ax1.set_ylabel('S21 (dBm)')
-                        elif plot_option == "Plot \u2220S21 (deg)":
-                            zs = np.angle(f['S21'][:], deg=True)
-                            ax1.set_ylabel('\u2220S21 (deg)')
-                        elif plot_option == "Plot R[S21]":
-                            zs = np.real(f['S21'][:])
-                            ax1.set_ylabel('R[S21]')
-                        elif plot_option == "Plot I[S21]":
-                            zs = np.imag(f['S21'][:])
-                            ax1.set_ylabel('I[S21]')
-                            
-                        ax1.plot(xs, zs)
-                        ax1.set_xlim([xs[0], xs[-1]])
-                    
-                    self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
-    
-                if expttype == '2D':    # 2D type plotter
-                    self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
-                    ax1 = self.figure.add_subplot(221)
-                    ax2 = self.figure.add_subplot(222)
-                    ax3 = self.figure.add_subplot(223)
-                    plt.subplots_adjust(bottom=0.2)
-                    ys_slider = plt.axes([0.95, 0.574, 0.01, 0.305])
-                    xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
-                    self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-                    
-                    slider1 = Slider(ys_slider, ax1_ylabel, valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
-                    slider2 = Slider(xs_slider, ax1_xlabel, valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
+                self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
+                slider1.on_changed(animate)
+                slider2.on_changed(animate)
             
-                    def animate(i):
-                        ax1.clear()
-                        ax2.clear()
-                        ax3.clear()
-                        plot_option = self.combo_box.currentText()
-                        ax1.set_xlabel(ax1_xlabel)
-                        ax1.set_ylabel(ax1_ylabel)
-                        ax2.set_xlabel(ax1_xlabel)
-                        ax3.set_xlabel(ax1_ylabel)
-                        if plot_option == "Plot S21 (dB)":
-                            zs = 20*np.log10(np.abs(f['S21'][:]))
-                            ax2.set_ylabel('S21 (dB)')
-                            ax3.set_ylabel('S21 (dB)')
-                        elif plot_option == "Plot \u2220S21 (deg)":
-                            zs = np.angle(f['S21'][:], deg=True)
-                            ax2.set_ylabel('\u2220S21 (deg)')
-                            ax3.set_ylabel('\u2220S21 (deg)')
-                        elif plot_option == "Plot R[S21]":
-                            zs = np.real(f['S21'][:])
-                            ax2.set_ylabel('R[S21]')
-                            ax3.set_ylabel('R[S21]')
-                        elif plot_option == "Plot I[S21]":
-                            zs = np.imag(f['S21'][:])
-                            ax2.set_ylabel('I[S21]')
-                            ax3.set_ylabel('I[S21]')
             
+            if exptinst == 'RFSOC' and expttype == '1D':
+                self.combo_box.clear()
+                self.combo_box.addItem("Plot magnitude (a.u.)")
+                self.combo_box.addItem("Plot Phase (deg)")
+                self.combo_box.addItem("Plot I")
+                self.combo_box.addItem("Plot Q")
+                self.combo_box.setCurrentIndex(0)
+                self.resize(1200, 600)
+                self.figure.set_size_inches(16, 6)
+                self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
+                ax1 = self.figure.add_subplot(121)
+                plt.subplots_adjust(bottom=0.2)
+                self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+                
+                def animate(i):
+                    ax1.clear()
+                    plot_option = self.combo_box.currentIndex()
+                    ax1.set_xlabel(ax1_xlabel)
+                    if plot_option == 0:
+                        zs = np.abs(f['S21'][:])
+                        ax1.set_ylabel('Transmission (a.u.)')
+                    elif plot_option == 1:
+                        zs = np.angle(f['S21'][:], deg=True)
+                        ax1.set_ylabel('Phase (deg)')
+                    elif plot_option == 2:
+                        zs = np.real(f['S21'][:])
+                        ax1.set_ylabel('I (a.u.)')
+                    elif plot_option == 3:
+                        zs = np.imag(f['S21'][:])
+                        ax1.set_ylabel('Q (a.u.)')
                         
-                        slider1.valtext.set_text(f'{ys[slider1.val]:.2f}')
-                        slider2.valtext.set_text(f'{xs[slider2.val]:.2e}')
-                        ax1.pcolormesh(xs, ys, zs)
-                        ax1.axhline(ys[slider1.val], color = 'r', lw=1, alpha = 0.75)
-                        ax1.axvline(xs[slider2.val], color = 'b', lw=1, alpha = 0.75)
-                        ax2.plot(xs, zs[slider1.val].T)
-                        ax2.set_xlim([xs[0],xs[-1]])
-                        ax3.plot(ys, zs.T[slider2.val].T)
-                        ax3.set_xlim([ys[0],ys[-1]])
+                    ax1.plot(xs, zs)
+                    ax1.set_xlim([xs[0], xs[-1]])
+                
+                self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
     
-                        
-                    self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
-                    slider1.on_changed(animate)
-                    slider2.on_changed(animate)
-            
-            
-            elif exptinst == 'RFSOC':
-                if expttype == '1D':    # 1D type plotter
-                    self.resize(1600, 600)
-                    self.figure.set_size_inches(16, 6)
-                    self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
-                    ax1 = self.figure.add_subplot(121)
-                    plt.subplots_adjust(bottom=0.2)
-                    self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+            if exptinst == 'RFSOC' and expttype == '2D':    # 2D type plotter
+                self.combo_box.clear()
+                self.combo_box.addItem("Plot magnitude (a.u.)")
+                self.combo_box.addItem("Plot Phase (deg)")
+                self.combo_box.addItem("Plot I")
+                self.combo_box.addItem("Plot Q")
+                self.combo_box.setCurrentIndex(0)
+                self.resize(1600,1200)
+                self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
+                ax1 = self.figure.add_subplot(221)
+                ax2 = self.figure.add_subplot(222)
+                ax3 = self.figure.add_subplot(223)
+                plt.subplots_adjust(bottom=0.2)
+                ys_slider = plt.axes([0.95, 0.574, 0.01, 0.305])
+                xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
+                self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+                
+                slider1 = Slider(ys_slider, ax1_ylabel, valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
+                slider2 = Slider(xs_slider, ax1_xlabel, valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
+        
+                def animate(i):
+                    ax1.clear()
+                    ax2.clear()
+                    ax3.clear()
+                    plot_option = self.combo_box.currentIndex()
+                    ax1.set_xlabel(ax1_xlabel)
+                    ax1.set_ylabel(ax1_ylabel)
+                    ax2.set_xlabel(ax1_xlabel)
+                    ax3.set_xlabel(ax1_ylabel)
+                    if plot_option == 0:
+                        zs = np.abs(f['S21'][:])
+                        ax2.set_ylabel('Transmission (a.u.)')
+                        ax3.set_ylabel('Transmission (a.u.)')
+                    elif plot_option == 1:
+                        zs = np.angle(f['S21'][:], deg=True)
+                        ax2.set_ylabel('Phase (deg)')
+                        ax3.set_ylabel('Phase (deg)')
+                    elif plot_option == 2:
+                        zs = np.real(f['S21'][:])
+                        ax2.set_ylabel('I (a.u.)')
+                        ax3.set_ylabel('I (a.u.)')
+                    elif plot_option == 3:
+                        zs = np.imag(f['S21'][:])
+                        ax2.set_ylabel('Q (a.u.)')
+                        ax3.set_ylabel('Q (a.u.)')
+        
                     
-                    def animate(i):
-                        ax1.clear()
-                        plot_option = self.combo_box.currentText()
-                        ax1.set_xlabel(ax1_xlabel)
-                        if plot_option == "Plot magnitude":
-                            zs = np.abs(f['S21'][:])
-                            ax1.set_ylabel('Transmission (a.u.)')
-                        elif plot_option == "Plot Phase (deg)":
-                            zs = np.angle(f['S21'][:], deg=True)
-                            ax1.set_ylabel('Phase (deg)')
-                        elif plot_option == "Plot I":
-                            zs = np.real(f['S21'][:])
-                            ax1.set_ylabel('I (a.u.)')
-                        elif plot_option == "Plot Q":
-                            zs = np.imag(f['S21'][:])
-                            ax1.set_ylabel('Q (a.u.)')
-                            
-                        ax1.plot(xs, zs)
-                        ax1.set_xlim([xs[0], xs[-1]])
+                    slider1.valtext.set_text(f'{ys[slider1.val]:.2f}')
+                    slider2.valtext.set_text(f'{xs[slider2.val]:.2e}')
+                    ax1.pcolormesh(xs, ys, zs)
+                    ax1.axhline(ys[slider1.val], color = 'r', lw=1, alpha = 0.75)
+                    ax1.axvline(xs[slider2.val], color = 'b', lw=1, alpha = 0.75)
+                    ax2.plot(xs, zs[slider1.val].T)
+                    ax2.set_xlim([xs[0],xs[-1]])
+                    ax3.plot(ys, zs.T[slider2.val].T)
+                    ax3.set_xlim([ys[0],ys[-1]])
+
                     
-                    self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
-    
-                if expttype == '2D':    # 2D type plotter
-                    self.figure.suptitle(metadata["Expt ID"], fontsize = 16)
-                    ax1 = self.figure.add_subplot(221)
-                    ax2 = self.figure.add_subplot(222)
-                    ax3 = self.figure.add_subplot(223)
-                    plt.subplots_adjust(bottom=0.2)
-                    ys_slider = plt.axes([0.95, 0.574, 0.01, 0.305])
-                    xs_slider = plt.axes([0.125, 0.515, 0.3525, 0.013])
-                    self.figure.text(0.6, 0.0,'Metadata: \n \n'+json.dumps(metadata, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-                    
-                    slider1 = Slider(ys_slider, ax1_ylabel, valmin=0, valmax=len(ys)-1, valinit=0, valstep = 1, dragging = True, orientation = 'vertical')
-                    slider2 = Slider(xs_slider, ax1_xlabel, valmin=0, valmax=len(xs)-1, valinit=0, valstep = 1, dragging = True, orientation = 'horizontal')
-            
-                    def animate(i):
-                        ax1.clear()
-                        ax2.clear()
-                        ax3.clear()
-                        plot_option = self.combo_box.currentText()
-                        ax1.set_xlabel(ax1_xlabel)
-                        ax1.set_ylabel(ax1_ylabel)
-                        ax2.set_xlabel(ax1_xlabel)
-                        ax3.set_xlabel(ax1_ylabel)
-                        if plot_option == "Plot magnitude":
-                            zs = np.abs(f['S21'][:])
-                            ax2.set_ylabel('Transmission (a.u.)')
-                            ax3.set_ylabel('Transmission (a.u.)')
-                        elif plot_option == "Plot Phase (deg)":
-                            zs = np.angle(f['S21'][:], deg=True)
-                            ax2.set_ylabel('Phase (deg)')
-                            ax3.set_ylabel('Phase (deg)')
-                        elif plot_option == "Plot I":
-                            zs = np.real(f['S21'][:])
-                            ax2.set_ylabel('I (a.u.)')
-                            ax3.set_ylabel('I (a.u.)')
-                        elif plot_option == "Plot Q":
-                            zs = np.imag(f['S21'][:])
-                            ax2.set_ylabel('Q (a.u.)')
-                            ax3.set_ylabel('Q (a.u.)')
-            
-                        
-                        slider1.valtext.set_text(f'{ys[slider1.val]:.2f}')
-                        slider2.valtext.set_text(f'{xs[slider2.val]:.2e}')
-                        ax1.pcolormesh(xs, ys, zs)
-                        ax1.axhline(ys[slider1.val], color = 'r', lw=1, alpha = 0.75)
-                        ax1.axvline(xs[slider2.val], color = 'b', lw=1, alpha = 0.75)
-                        ax2.plot(xs, zs[slider1.val].T)
-                        ax2.set_xlim([xs[0],xs[-1]])
-                        ax3.plot(ys, zs.T[slider2.val].T)
-                        ax3.set_xlim([ys[0],ys[-1]])
-    
-                        
-                    self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
-                    slider1.on_changed(animate)
-                    slider2.on_changed(animate)
+                self.anim = animation.FuncAnimation(self.figure, animate, interval=100, cache_frame_data=False)
+                slider1.on_changed(animate)
+                slider2.on_changed(animate)
             
         except Exception as e:
             tb = traceback.extract_tb(e.__traceback__) 
