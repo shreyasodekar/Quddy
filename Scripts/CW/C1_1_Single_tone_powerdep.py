@@ -62,7 +62,7 @@ pna.sweep_mode("CONT")
 # Plot 
 fig = plt.figure(figsize=(16,6))
 plt.subplot(121, title="Single Tone - power dependence", xlabel="Frequency (GHz)", ylabel="VNA output power (dBm)")
-plt.pcolormesh(x_pts/1e9, y_pts ,10*np.log10(np.abs(data)))
+plt.pcolormesh(x_pts/1e9, y_pts ,20*np.log10(np.abs(data)))
 plt.colorbar()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
 plt.savefig(path+'/'+filename.strip('.h5')+'.png')

@@ -25,8 +25,8 @@ snapshot = generate_empty_snapshot_array(len(y_pts),len(x_pts))
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
-f.create_dataset('Power', data = x_pts)
-f.create_dataset('Pulse_length', data = y_pts)
+f.create_dataset('Gain', data = x_pts)
+f.create_dataset('Pulse length', data = y_pts)
 f.create_dataset('S21', data = data)
 f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
@@ -39,10 +39,10 @@ switch.channels[1].switch(2)
 for x in tqdm(range(len(x_pts))):
     config['qubit']['gain'] = x_pts[x].item()
     for y in range(len(y_pts)):
-        config['qubit']['pulse_length'] = y_pts[y]
-        prog = Programs.ConstantPulseProbe(soccfg, config)
-        # config['qubit']['sigma'] = y_pts[y]
-        # prog = Programs.GaussianPulseProbe(soccfg, config)
+        # config['qubit']['pulse_length'] = y_pts[y]
+        # prog = Programs.ConstantPulseProbe(soccfg, config)
+        config['qubit']['sigma'] = y_pts[y]/3
+        prog = Programs.GaussianPulseProbe(soccfg, config)
         avgi, avgq = prog.acquire(soc, progress=False)
         data[y,x] = avgi[0][0]+1j*avgq[0][0]
         f['S21'][:] = data
@@ -51,7 +51,8 @@ for x in tqdm(range(len(x_pts))):
 
 # Plot results.
 fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Rabi 2D Plot", xlabel="DAC Gain (a.u.)", ylabel="Pulse Length (Clock ticks)")
+# plt.subplot(121,title="Rabi 2D Plot", xlabel="DAC Gain (a.u.)", ylabel="Pulse Length (Clock ticks)")
+plt.subplot(121,title="Rabi 2D Plot", xlabel="DAC Gain (a.u.)", ylabel="Pulse Length (ns)")
 pc = plt.pcolormesh(x_pts,y_pts, data.imag)
 fig.colorbar(pc)
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)

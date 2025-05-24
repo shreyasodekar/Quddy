@@ -49,7 +49,7 @@ for y in tqdm(range(len(y_pts))):
 
 # Plot results. Need to add fitting functions.
 fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Resonator Spectroscopy - Gate Dependence", xlabel="Frequency (MHz)", ylabel="Gate Voltage")
+plt.subplot(121,title="Resonator Spectroscopy - Gate Dependence", xlabel="Frequency (MHz)", ylabel="Gate Voltage (mV)")
 plt.pcolormesh(x_pts, y_pts, np.abs(data))
 plt.colorbar()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)

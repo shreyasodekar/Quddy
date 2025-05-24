@@ -9,6 +9,11 @@ expname = 'C2_Two_tone'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
+expt_cfg = {'start': 3.9e9,
+            'stop': 4e9,
+            'points': 300
+            }
+
 x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
 
 switch.channels[0].switch(1)
@@ -61,7 +66,7 @@ popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[
 # Plot 
 fig = plt.figure(figsize=(16,6))
 plt.subplot(121, title="Two Tone", xlabel="Frequency (GHz)", ylabel="Magnitude (dB)")
-plt.plot(x_pts, 10*np.log10(np.abs(data)))
+plt.plot(x_pts, 20*np.log10(np.abs(data)))
 plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
 plt.grid()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)

@@ -24,7 +24,7 @@ snapshot = generate_empty_snapshot_array(len(x_pts),0)
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
-f.create_dataset('Frequency', data = x_pts)
+f.create_dataset('Time', data = x_pts)
 f.create_dataset('S21', data = data)
 f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
@@ -41,7 +41,7 @@ for x in tqdm(range(len(x_pts))):
     snapshot[x] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
 
-data  = rotate_s21(data)*np.exp(1j*np.pi)
+data  = rotate_s21(data)
 
 # popt, pcov = curve_fit(fitter.sinedecay, x_pts, data.real, p0=[0, 0.02, 3, 0.5, 0])
    

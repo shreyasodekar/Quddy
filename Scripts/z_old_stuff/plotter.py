@@ -166,7 +166,7 @@ class Plotter(QMainWindow):
                     expttype = '1D'
                     exptinst = 'RFSOC'
                     xs = f['Time'][:]
-                    ax1_xlabel = 'Time (ns)'
+                    ax1_xlabel = 'Time (Clock ticks)'
                     
                 if exptname == 'R1_Single_tone' or exptname == 'R2_Two_tone':
                     expttype = '1D'
@@ -202,13 +202,22 @@ class Plotter(QMainWindow):
                     ax1_xlabel = 'Frequency (GHz)'
                     ax1_ylabel = 'RF output power (dBm)'
 
-                if exptname == 'R1_1_Single_tone_powerdep' or exptname == 'R2_1_Two_tone_powerdep' or exptname == 'R4_2_Chevron':
+                if exptname == 'R1_1_Single_tone_powerdep' or exptname == 'R2_1_Two_tone_powerdep':
                     expttype = '2D'
                     exptinst = 'RFSOC'
                     xs = f['Frequency'][:]/1e9
-                    ys = f['Power'][:]
+                    ys = f['Gain'][:]
                     ax1_xlabel = 'Frequency (GHz)'
                     ax1_ylabel = 'Gain (DAC units)'
+
+                if exptname == 'R4_2_Chevron':
+                    expttype = '2D'
+                    exptinst = 'RFSOC'
+                    xs = f['Frequency'][:]/1e9
+                    ys = f['PUlse Length'][:]
+                    ax1_xlabel = 'Frequency (GHz)'
+                    ax1_ylabel = 'Pulse Length (ns)'
+
                     
                 if exptname == 'C1_2_Single_tone_gatedep' or exptname == 'C2_2_Two_tone_gatedep':
                     expttype = '2D'
@@ -229,10 +238,10 @@ class Plotter(QMainWindow):
                 if exptname == 'R4_1_2dRabi':
                     expttype = '2D'
                     exptinst = 'RFSOC'
-                    xs = f['Pulse Length'][:]
-                    ys = f['Gain'][:]
-                    ax1_xlabel = 'Pulse Length (ns)'
-                    ax1_ylabel = 'Gain (DAC units)'
+                    xs = f['Gain'][:]
+                    ys = f['Pulse'][:]
+                    ax1_xlabel = 'Gain (DAC units)'
+                    ax1_ylabel = 'Pulse Length (ns)'
                     
             ########################
             

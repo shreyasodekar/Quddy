@@ -21,7 +21,7 @@ snapshot = generate_empty_snapshot_array(len(x_pts),0)
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
-f.create_dataset('Frequency', data = x_pts)
+f.create_dataset('Pulse Length', data = x_pts)
 f.create_dataset('S21', data = data)
 f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
@@ -32,7 +32,7 @@ switch.channels[1].switch(2)
 for x in tqdm(range(len(x_pts))):
     # config['qubit']['pulse_length'] = x_pts[x]
     # prog = Programs.ConstantPulseProbe(soccfg, config)
-    config['qubit']['sigma'] = x_pts[x]
+    config['qubit']['sigma'] = x_pts[x]/3
     prog = Programs.GaussianPulseProbe(soccfg, config)
     avgi, avgq = prog.acquire(soc, progress=False)
     data[x] = avgi[0][0]+1j*avgq[0][0]
@@ -46,7 +46,7 @@ popt, pcov = curve_fit(fitter.sinedecay, x_pts, data.real, p0=[0, 0.02, 3, 0.5, 
     
 fig = plt.figure(figsize=(16,6))
 # plt.subplot(121,title="Length Rabi", xlabel="Pulse Length (Clock ticks)", ylabel="Amp. (adc level)")
-plt.subplot(121,title="Length Rabi", xlabel="Sigma (us)", ylabel="Amp. (adc level)")
+plt.subplot(121,title="Length Rabi", xlabel="Pulse Length (ns)", ylabel="Amp. (adc level)")
 plt.plot(x_pts, data.real,'.')
 # plt.plot(x_pts, data.imag,'.')
 plt.plot(x_pts,fitter.sinedecay(x_pts, popt[0], popt[1], popt[2], popt[3], popt[4]), label='Fit')

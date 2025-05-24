@@ -40,14 +40,14 @@ snapshot = generate_empty_snapshot_array(len(y_pts),0)
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent=4))
 f.create_dataset('Frequency', data = x_pts)
-f.create_dataset('Power', data = y_pts)
+f.create_dataset('Gate Voltage', data = y_pts)
 f.create_dataset('S21', data = data)
 f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 
 for y in tqdm(range(len(y_pts))):
-    ivvi._set_dac(12, y_pts[y]/5)
+    # ivvi._set_dac(12, y_pts[y]/5)
     pna.output(1)
     temp = pna.polar()
     data[y] = temp
@@ -62,7 +62,7 @@ pna.sweep_mode("CONT")
 # Plot 
 fig = plt.figure(figsize=(16,6))
 plt.subplot(121, title="Single Tone - Gate dependence", xlabel="Frequency (GHz)", ylabel="V_g (mV)")
-plt.pcolormesh(x_pts, y_pts ,10*np.log10(np.abs(data)))
+plt.pcolormesh(x_pts, y_pts ,20*np.log10(np.abs(data)))
 plt.colorbar()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
 plt.savefig(path+'/'+filename.strip('.h5')+'.png')

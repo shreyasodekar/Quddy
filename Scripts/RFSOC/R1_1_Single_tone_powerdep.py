@@ -28,7 +28,7 @@ snapshot = generate_empty_snapshot_array(len(y_pts),len(x_pts))
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
-f.create_dataset('Power', data = y_pts)
+f.create_dataset('Gain', data = y_pts)
 f.create_dataset('S21', data = data)
 f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
@@ -52,7 +52,7 @@ for y in tqdm(range(len(y_pts))):
 
 # Plot results. Need to add fitting functions.
 fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Resonator Spectroscopy - Power Dependence", xlabel="Frequency (MHz)", ylabel="Gain")
+plt.subplot(121,title="Resonator Spectroscopy - Power Dependence", xlabel="Frequency (MHz)", ylabel="Gain (a.u.)")
 plt.pcolormesh(x_pts, y_pts, np.abs(data))
 plt.colorbar()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)

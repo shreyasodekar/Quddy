@@ -51,7 +51,7 @@ popt, pcov = curve_fit(fitter.lorentzian, x_pts, data.real, p0=[x_pts[np.argmax(
 
 # Plot results.
 fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Pulse Probe Spectroscopy", xlabel="Frequency (MHz)", ylabel="Amp. (adc level)")
+plt.subplot(121,title="Pulse Probe Spectroscopy", xlabel="Frequency (MHz)", ylabel="Transmission (adc level)")
 plt.plot(x_pts, data.real,'.-')
 # plt.plot(x_pts, data.imag,'.')
 plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
