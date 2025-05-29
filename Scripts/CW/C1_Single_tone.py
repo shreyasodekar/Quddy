@@ -4,7 +4,7 @@ with open(pwd + '\\config.json','r+') as f:
     config = json.load(f)
 config['Timestamp'] = datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')
 
-path = os.path.abspath('./Data') + '/CW/' + str(config['Device Name'])
+path = os.path.abspath('./Data') + '/' +str(config['Device Name']) +  '/CW/'
 expname = 'C1_Single_tone'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
