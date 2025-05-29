@@ -41,7 +41,8 @@ expt = '2025_05_24_TransmonFridge_Res-LL-2_Cooldown1'
 
 
 if not os.path.exists(directory + expt):
-    os.makedirs(directory + expt)
+    os.makedirs(directory + expt + '/All/'+ 'CW')
+    os.makedirs(directory + expt + '/All/'+ 'RFSOC')
     os.makedirs(directory + expt + '/R1/' + 'CW')
     os.makedirs(directory + expt + '/R1/' + 'RFSOC')
     os.makedirs(directory + expt + '/R2/' + 'CW')
