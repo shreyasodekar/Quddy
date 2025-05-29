@@ -53,7 +53,7 @@ plt.subplot(121,title="Chevron Plot", xlabel="Frequency (MHz)", ylabel="Pulse le
 pc = plt.pcolormesh(x_pts, y_pts, data.real)
 fig.colorbar(pc)
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
 # Save to docx

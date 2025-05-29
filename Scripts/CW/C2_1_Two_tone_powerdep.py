@@ -70,7 +70,7 @@ plt.subplot(121, title="Two Tone - power dependence", xlabel="Frequency (GHz)", 
 plt.pcolormesh(x_pts/1e9, y_pts ,20*np.log10(np.abs(data)))
 plt.colorbar()
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
 # Save to docx

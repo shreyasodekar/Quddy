@@ -48,7 +48,7 @@ fig = plt.figure(figsize=(16,6))
 plt.subplot(121,title=r"T2 Hahn Echo", xlabel=r"$\tau$ ($\mu$s)", ylabel="Amp. (adc level)")
 plt.plot(x_pts, data.real, '.-')
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
 # Save to docx

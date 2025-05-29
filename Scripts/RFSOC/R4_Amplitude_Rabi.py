@@ -51,7 +51,7 @@ plt.subplot(121,title="Amplitude Rabi", xlabel="Gain (a.u.)", ylabel="Amp. (adc 
 plt.plot(x_pts, data.real,'.-')
 plt.plot(x_pts,fitter.sinedecay(x_pts, popt[0], popt[1], popt[2], popt[3], popt[4]), label='Fit')
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 print(r'$\pi$-pulse Gain @ length = ' + str(config['qubit']['pulse_length']) + ' is ' + str((np.pi*popt[2] + popt[4]/popt[2])/2) + 'DAC units')
 print(r'$\pi/2$-pulse Gain @ Length = ' + str(config['qubit']['pulse_length']) + ' is ' + str((np.pi*popt[2] + popt[4]/popt[2])/4) + 'DAC units')

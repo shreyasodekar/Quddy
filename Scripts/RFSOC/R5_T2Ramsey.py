@@ -51,7 +51,7 @@ plt.subplot(121,title=r"T2$^*$ Ramsey", xlabel=r"$\tau$ ($\mu$s)", ylabel="Amp. 
 plt.plot(x_pts, data.real,'.-')
 # plt.plot(x_pts,fitter.sinedecay(x_pts, popt[0], popt[1], popt[2], popt[3], popt[4]), label='Fit')
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
 print('T2* is ' + str(popt[3]) + ' us')

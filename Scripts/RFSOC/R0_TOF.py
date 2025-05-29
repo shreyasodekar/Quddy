@@ -37,7 +37,7 @@ plt.plot(data.imag, label="Q value")
 # plt.legend()
 # plt.axvline(config["adc_trig_offset"])
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 print(np.angle(np.mean(data))*180/np.pi)
 

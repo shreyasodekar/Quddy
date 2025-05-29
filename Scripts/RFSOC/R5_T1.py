@@ -48,7 +48,7 @@ plt.subplot(121,title="T1", xlabel="Time (us)", ylabel="Amp. (adc level)")
 plt.plot(x_pts, data.real,'.', label='I')
 plt.plot(x_pts,fitter.Tdecay(x_pts, popt[0], popt[1], popt[2]), label='Fit')
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 print('T1 is ' + str(popt[2]) + ' us' )
 

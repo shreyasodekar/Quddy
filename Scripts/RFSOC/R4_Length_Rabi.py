@@ -51,7 +51,7 @@ plt.plot(x_pts, data.real,'.')
 # plt.plot(x_pts, data.imag,'.')
 plt.plot(x_pts,fitter.sinedecay(x_pts, popt[0], popt[1], popt[2], popt[3], popt[4]), label='Fit')
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.strip('.h5')+'.png')
+plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
 print('pi-pulse sigma @ Gain = ' + str(config['qubit']['gain']) + ' is ' + str((np.pi/2 - np.abs(popt[4]))/popt[2]) + ' us')
