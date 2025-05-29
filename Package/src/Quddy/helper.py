@@ -92,35 +92,34 @@ def generate_empty_nan_array(x, y):
         arr = arr*np.nan
     return arr
 
-nan_snapshot = {"MC Temperature" : np.nan,
-            "Magnetic Field Vector" : np.nan,
-            "PT2 Plate Temperature" : np.nan,
-            "Cold Plate Temperature" : np.nan,
-            "Still Plate Temperature" : np.nan}
-
-
 def generate_empty_snapshot_array(x, y):
+    snapshot_dtype = np.dtype([
+        ('MC Temperature', 'f8'),
+        ('Magnetic Field Vector', 'f8', (3,)),
+        ('PT2 Plate Temperature', 'f8'),
+        ('Cold Plate Temperature', 'f8'),
+        ('Still Plate Temperature', 'f8'),
+    ])
+
     if y == 0:
-        arr = [nan_snapshot for i in range(x)]
-        arr = np.array(arr, dtype=object)
-    else:    
-        arr = [[None for j in range(y)] for i in range(x)]
-        arr = np.array(arr, dtype=object)
+        arr = np.empty(x, dtype=snapshot_dtype)
+    else:
+        arr = np.empty((x, y), dtype=snapshot_dtype)
+
+    arr[:] = np.nan
+
     return arr
 
 def get_fridge_snapshot(Proteox):
-    snapshot = {"MC Temperature" : Proteox.Mixing_Chamber_Temperature(),
-                "Magnetic Field Vector" : Proteox.Magnetic_Field_Vector(),
-                "PT2 Plate Temperature" : Proteox.PT2_Plate_Temperature(),
-                "Cold Plate Temperature" : Proteox.Cold_Plate_Temperature(),
-                "Still Plate Temperature" : Proteox.Still_Plate_Temperature()}
+    snapshot = (Proteox.Mixing_Chamber_Temperature(),
+                Proteox.Magnetic_Field_Vector(),
+                Proteox.PT2_Plate_Temperature(),
+                Proteox.Cold_Plate_Temperature(),
+                Proteox.Still_Plate_Temperature()
+                )
     return snapshot
 
 def rotate_s21(data):
-    imaginary_parts = np.imag(data)
-    min_imag = np.min(imaginary_parts)
-    max_imag = np.max(imaginary_parts)
-
     angles = np.linspace(0, 2 * np.pi, 360)
     variances = [np.var(np.imag(data * np.exp(-1j * angle))) for angle in angles]
     optimal_angle = angles[np.argmin(variances)]
