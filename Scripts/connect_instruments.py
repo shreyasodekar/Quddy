@@ -38,23 +38,21 @@ soc, soccfg = make_proxy(ns_host="192.168.1.138", ns_port=8888, proxy_name="rfso
 directory = 'C:/Users/frolovlab/Documents/Python Scripts/Data/'
 expt = '2025_05_24_TransmonFridge_Res-LL-2_Cooldown1'
 
-
-
 if not os.path.exists(directory + expt):
-    os.makedirs(directory + expt + '/All/'+ 'CW')
-    os.makedirs(directory + expt + '/All/'+ 'RFSOC')
-    os.makedirs(directory + expt + '/R1/' + 'CW')
-    os.makedirs(directory + expt + '/R1/' + 'RFSOC')
-    os.makedirs(directory + expt + '/R2/' + 'CW')
-    os.makedirs(directory + expt + '/R2/' + 'RFSOC')
-    os.makedirs(directory + expt + '/R3/' + 'CW')
-    os.makedirs(directory + expt + '/R3/' + 'RFSOC')
-    os.makedirs(directory + expt + '/R4/' + 'CW')
-    os.makedirs(directory + expt + '/R4/' + 'RFSOC')
-    os.makedirs(directory + expt + '/R5/' + 'CW')
-    os.makedirs(directory + expt + '/R5/' + 'RFSOC')
-    os.makedirs(directory + expt + '/R6/' + 'CW')
-    os.makedirs(directory + expt + '/R6/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/All/'+ 'CW')
+    os.makedirs(directory + expt + 'Data' + '/All/'+ 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R1/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R1/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R2/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R2/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R3/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R3/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R4/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R4/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R5/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R5/' + 'RFSOC')
+    os.makedirs(directory + expt + 'Data' + '/R6/' + 'CW')
+    os.makedirs(directory + expt + 'Data' + '/R6/' + 'RFSOC')
     
 os.chdir(directory + expt)
 
