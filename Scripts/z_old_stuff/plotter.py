@@ -214,7 +214,7 @@ class Plotter(QMainWindow):
                     expttype = '2D'
                     exptinst = 'RFSOC'
                     xs = f['Frequency'][:]/1e9
-                    ys = f['PUlse Length'][:]
+                    ys = f['Pulse Length'][:]
                     ax1_xlabel = 'Frequency (GHz)'
                     ax1_ylabel = 'Pulse Length (ns)'
 
@@ -234,12 +234,28 @@ class Plotter(QMainWindow):
                     ys = f['Gate Voltage'][:]
                     ax1_xlabel = 'Frequency (GHz)'
                     ax1_ylabel = 'Gate Voltage (mV)'
+
+                if exptname == 'C1_3_Single_tone_tempdep' or exptname == 'C2_3_Two_tone_tempdep':
+                    expttype = '2D'
+                    exptinst = 'CW'
+                    xs = f['Frequency'][:]/1e9
+                    ys = f['Temperature'][:]
+                    ax1_xlabel = 'Frequency (GHz)'
+                    ax1_ylabel = 'Temperature (K)'
+
+                if exptname == 'R1_3_Single_tone_tempdep' or exptname == 'R2_3_Two_tone_tempdep':
+                    expttype = '2D'
+                    exptinst = 'RFSOC'
+                    xs = f['Frequency'][:]/1e9
+                    ys = f['Temperature'][:]
+                    ax1_xlabel = 'Frequency (GHz)'
+                    ax1_ylabel = 'Temperature (K)'
                     
                 if exptname == 'R4_1_2dRabi':
                     expttype = '2D'
                     exptinst = 'RFSOC'
                     xs = f['Gain'][:]
-                    ys = f['Pulse'][:]
+                    ys = f['Pulse Length'][:]
                     ax1_xlabel = 'Gain (DAC units)'
                     ax1_ylabel = 'Pulse Length (ns)'
                     

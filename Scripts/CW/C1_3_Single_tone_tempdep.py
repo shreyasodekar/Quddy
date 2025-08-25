@@ -9,13 +9,13 @@ expname = 'C1_1_Single_tone_tempdep'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
-# expt_cfg = {'f_start': 8.568e9,
-#             'f_stop': 8.576e9,
-#             'f_points': 5000,
-#             't_start': 0.012,
-#             't_stop': 1,
-#             't_points' : 30
-#             }
+expt_cfg = {'f_start': 8.568e9,
+            'f_stop': 8.576e9,
+            'f_points': 5000,
+            't_start': 0.012,
+            't_stop': 1,
+            't_points' : 30
+            }
 
 x_pts = np.linspace(expt_cfg['f_start'],expt_cfg['f_stop'],expt_cfg['f_points'])
 y_pts = np.linspace(expt_cfg['t_start'],expt_cfg['t_stop'],expt_cfg['t_points'])

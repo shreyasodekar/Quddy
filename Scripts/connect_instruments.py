@@ -23,15 +23,19 @@ from qcodes.instrument_drivers.Keysight import KeysightN5183B
 
 from qcodes.instrument_drivers.Minicircuits import MiniCircuitsRCSPDT
 from qcodes_contrib_drivers.drivers.QuTech.IVVI import IVVI
+from qcodes_contrib_drivers.drivers.QuTech.Optodac import Optodac
 from qick.pyro import make_proxy
 
 Proteox = oiDECS('Proteox')
 Proteox.timeout(500)
 pna = KeysightP9374A('pna','TCPIP0::localhost::hislip0::INSTR')
+pna.timeout(5000)
+pna.visa_handle.chunk_size = 1024*1024
 mxg = KeysightN5183B('mxg','TCPIP0::192.168.1.140::inst0::INSTR')
 # ivvi = IVVI('ivvi', 'ASRL4::INSTR', numdacs=16, dac_step=10, dac_delay=0.01, safe_version=True, polarity=['BIP', 'BIP', 'BIP', 'BIP'], use_locks=False)
 # ivvi.set_dacs_zero()
-switch = MiniCircuitsRCSPDT('switch', '192.168.1.141')
+# switch = MiniCircuitsRCSPDT('switch', '192.168.1.141')
+ivvi = Optodac('ivvi', 'ASRL3::INSTR', numdacs=8)
 
 soc, soccfg = make_proxy(ns_host="192.168.1.138", ns_port=8888, proxy_name="rfsoc")
 

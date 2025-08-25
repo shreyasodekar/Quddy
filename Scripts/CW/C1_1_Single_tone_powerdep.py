@@ -4,18 +4,18 @@ with open(pwd + '\\config.json','r+') as f:
     config = json.load(f)
 config['Timestamp'] = datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')
 
-path = os.path.abspath('./Data') + '/' +str(config['Device Name']) +  '/CW/'
+path = os.path.abspath('./Data') + '/' +str(config['Device Name']) +  '/CW/No_RTattn/'
 expname = 'C1_1_Single_tone_powerdep'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
-expt_cfg = {'f_start': 8.14e9,
-            'f_stop': 8.165e9,
-            'f_points': 401,
-            'p_start': -43,
-            'p_stop': 20,
-            'p_step' : 2
-            }
+# expt_cfg = {'f_start': 8.552e9,
+#             'f_stop': 8.558e9,
+#             'f_points': 10000,
+#             'p_start': -43,
+#             'p_stop': 19,
+#             'p_step' : 4
+#             }
 
 x_pts = np.linspace(expt_cfg['f_start'],expt_cfg['f_stop'],expt_cfg['f_points'])
 y_pts = np.arange(expt_cfg['p_start'],expt_cfg['p_stop'],expt_cfg['p_step'])
@@ -34,7 +34,7 @@ meas = Measurement()
 meas.register_parameter(pna.polar)
 
 data = generate_empty_nan_array(len(y_pts), len(x_pts))
-snapshot = generate_empty_snapshot_array(len(y_pts),0)
+# snapshot = generate_empty_snapshot_array(len(y_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -42,7 +42,7 @@ f.create_dataset('Metadata', data = json.dumps(config, indent=4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('Power', data = y_pts)
 f.create_dataset('S21', data = data)
-f.create_dataset('Fridge snapshot', data = snapshot)
+# f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 
@@ -53,8 +53,9 @@ for y in tqdm(range(len(y_pts))):
     data[y] = temp
     f['S21'][:] = data
     pna.output(0)
-    snapshot[y] = get_fridge_snapshot(Proteox)
-    f['Fridge snapshot'] = snapshot
+    # snapshot[y] = get_fridge_snapshot(Proteox)
+    # f['Fridge snapshot'] = snapshot
+    time.sleep(2)
 
 pna.sweep_mode("CONT")
 
@@ -69,14 +70,14 @@ plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 # plt.savefig(path+'/'+filename.split('.')[0]+'.svg')
 plt.show()
 
-# Save to docx
-savedoc = input('Save to Doc file? [y]/n : ')
-if savedoc == 'y' or savedoc == '':
-    picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
-    picture.Width = 500 #648 
-    picture.Height = 187.5 #243 
-    word.Selection.TypeText("\n")
+# # Save to docx
+# savedoc = input('Save to Doc file? [y]/n : ')
+# if savedoc == 'y' or savedoc == '':
+#     picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
+#     picture.Width = 500 #648 
+#     picture.Height = 187.5 #243 
+#     word.Selection.TypeText("\n")
 
-doc.Save()
+# doc.Save()
 
 f.close()
