@@ -26,7 +26,7 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QRadioButton,
     QButtonGroup, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox,
     QFrame, QScrollArea, QSplitter, QSlider, QToolButton, QSizePolicy,
-    QColorDialog
+    QColorDialog, QListWidget, QListWidgetItem
 )
 from PyQt5.QtGui import QPixmap, QIcon, QFont
 from PyQt5.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
@@ -72,11 +72,31 @@ class PlotSettings:
     colormap: str = 'viridis'
     line_color: str = '#1f77b4'
     line_width: float = 1.5
+    marker_style: str = 'None'  # None, o, s, ^, v, D, etc.
+    marker_size: float = 4.0
+    marker_color: str = '#1f77b4'
     grid_enabled: bool = True
     grid_alpha: float = 0.3
+    grid_width: float = 0.5
     autoscale: bool = True
     vmin: Optional[float] = None
     vmax: Optional[float] = None
+    # Tick settings
+    tick_size: float = 6.0
+    tick_width: float = 1.0
+    tick_font_size: float = 10.0
+    x_tick_count: int = 0  # 0 = auto
+    y_tick_count: int = 0  # 0 = auto
+    # Label settings
+    x_label_text: str = ''  # Empty = use default from spec
+    y_label_text: str = ''
+    z_label_text: str = ''  # For 2D plots - colorbar label
+    label_size: float = 12.0
+    # Title settings
+    title_text: str = ''
+    title_size: float = 14.0
+    # Y-axis padding for 1D plots (fraction of data range)
+    y_padding: float = 0.05
     
     def get_clim(self, data: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
         """Get color limits, using data range if autoscale or values not set."""
@@ -185,9 +205,9 @@ class DataTransforms:
 class CollapsibleSection(QWidget):
     """A collapsible section widget with header and content."""
 
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, parent=None, start_collapsed: bool = False):
         super().__init__(parent)
-        self.is_collapsed = False
+        self.is_collapsed = start_collapsed
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -195,9 +215,9 @@ class CollapsibleSection(QWidget):
 
         # Header button
         self.header = QToolButton()
-        self.header.setText(f"▼ {title}")
+        self.header.setText(f"{'▶' if start_collapsed else '▼'} {title}")
         self.header.setCheckable(True)
-        self.header.setChecked(True)
+        self.header.setChecked(not start_collapsed)
         self.header.setStyleSheet("""
             QToolButton {
                 background-color: #e8e8e8;
@@ -218,6 +238,7 @@ class CollapsibleSection(QWidget):
 
         # Content widget
         self.content = QWidget()
+        self.content.setVisible(not start_collapsed)
         self.content_layout = QVBoxLayout(self.content)
         self.content_layout.setContentsMargins(8, 8, 8, 8)
         self.content_layout.setSpacing(6)
@@ -283,6 +304,12 @@ class Sidebar(QWidget):
                 margin-top: 8px;
                 padding-top: 8px;
             }
+            QLineEdit {
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 4px;
+                font-size: 11px;
+            }
         """)
 
         main_layout = QVBoxLayout(self)
@@ -331,12 +358,38 @@ class Sidebar(QWidget):
         interval_layout.addWidget(self.interval_spin)
         data_section.add_layout(interval_layout)
 
+        # Stitch files button
+        self.stitch_btn = QPushButton("📎 Stitch Files...")
+        self.stitch_btn.setToolTip("Combine multiple HDF5 files of the same experiment type")
+        self.stitch_btn.clicked.connect(lambda: self._emit('stitch_files'))
+        data_section.add_widget(self.stitch_btn)
+
+        # Linecuts toggle (for 2D only) - moved from Appearance
+        self.linecuts_checkbox = QCheckBox("Show Linecuts")
+        self.linecuts_checkbox.setChecked(False)
+        self.linecuts_checkbox.toggled.connect(
+            lambda c: self._emit('linecuts_toggled', c))
+        data_section.add_widget(self.linecuts_checkbox)
+
+        # Callout mode toggle - moved from Appearance
+        self.callout_checkbox = QCheckBox("Callout Mode")
+        self.callout_checkbox.setChecked(False)
+        self.callout_checkbox.setToolTip("Click on plot to add annotation markers")
+        self.callout_checkbox.toggled.connect(
+            lambda c: self._emit('callout_toggled', c))
+        data_section.add_widget(self.callout_checkbox)
+
+        # Clear callouts button - moved from Appearance
+        self.clear_callouts_btn = QPushButton("Clear Callouts")
+        self.clear_callouts_btn.clicked.connect(lambda: self._emit('clear_callouts'))
+        data_section.add_widget(self.clear_callouts_btn)
+
         self.scroll_layout.addWidget(data_section)
 
-        # === Appearance Section ===
-        appearance_section = CollapsibleSection("Appearance")
+        # === Color Scale Section (for 2D) ===
+        self.scale_section = CollapsibleSection("Color Scale", start_collapsed=True)
 
-        # Colormap (for 2D)
+        # Colormap (moved from Appearance to top of Color Scale)
         cmap_layout = QVBoxLayout()
         cmap_layout.addWidget(QLabel("Colormap:"))
         self.cmap_combo = QComboBox()
@@ -349,66 +402,7 @@ class Sidebar(QWidget):
         self.cmap_combo.addItems(colormaps)
         self.cmap_combo.currentTextChanged.connect(self._on_colormap_changed)
         cmap_layout.addWidget(self.cmap_combo)
-        appearance_section.add_layout(cmap_layout)
-
-        # Line color (for 1D)
-        color_layout = QHBoxLayout()
-        color_layout.addWidget(QLabel("Line Color:"))
-        self.color_button = QPushButton()
-        self.color_button.setFixedSize(60, 24)
-        self.color_button.setStyleSheet(f"background-color: {self.settings.line_color};")
-        self.color_button.clicked.connect(self._pick_color)
-        color_layout.addWidget(self.color_button)
-        color_layout.addStretch()
-        appearance_section.add_layout(color_layout)
-
-        # Line width
-        lw_layout = QHBoxLayout()
-        lw_layout.addWidget(QLabel("Line Width:"))
-        self.linewidth_spin = QDoubleSpinBox()
-        self.linewidth_spin.setRange(0.5, 5.0)
-        self.linewidth_spin.setValue(1.5)
-        self.linewidth_spin.setSingleStep(0.5)
-        self.linewidth_spin.valueChanged.connect(self._on_linewidth_changed)
-        lw_layout.addWidget(self.linewidth_spin)
-        appearance_section.add_layout(lw_layout)
-
-        # Grid
-        self.grid_checkbox = QCheckBox("Show Grid")
-        self.grid_checkbox.setChecked(True)
-        self.grid_checkbox.toggled.connect(self._on_grid_toggled)
-        appearance_section.add_widget(self.grid_checkbox)
-
-        # Linecuts toggle (for 2D only)
-        self.linecuts_checkbox = QCheckBox("Show Linecuts")
-        self.linecuts_checkbox.setChecked(False)
-        self.linecuts_checkbox.toggled.connect(
-            lambda c: self._emit('linecuts_toggled', c))
-        appearance_section.add_widget(self.linecuts_checkbox)
-
-        # Callout mode toggle
-        self.callout_checkbox = QCheckBox("Callout Mode")
-        self.callout_checkbox.setChecked(False)
-        self.callout_checkbox.setToolTip("Click on plot to add annotation markers")
-        self.callout_checkbox.toggled.connect(
-            lambda c: self._emit('callout_toggled', c))
-        appearance_section.add_widget(self.callout_checkbox)
-
-        # Clear callouts button
-        self.clear_callouts_btn = QPushButton("Clear Callouts")
-        self.clear_callouts_btn.clicked.connect(lambda: self._emit('clear_callouts'))
-        appearance_section.add_widget(self.clear_callouts_btn)
-
-        # Figure size button
-        self.figsize_btn = QPushButton("Figure Size...")
-        self.figsize_btn.setToolTip("Change figure dimensions")
-        self.figsize_btn.clicked.connect(lambda: self._emit('change_figsize'))
-        appearance_section.add_widget(self.figsize_btn)
-
-        self.scroll_layout.addWidget(appearance_section)
-
-        # === Color Scale Section (for 2D) ===
-        self.scale_section = CollapsibleSection("Color Scale")
+        self.scale_section.add_layout(cmap_layout)
 
         self.autoscale_checkbox = QCheckBox("Auto Scale")
         self.autoscale_checkbox.setChecked(True)
@@ -451,7 +445,7 @@ class Sidebar(QWidget):
         self.scroll_layout.addWidget(self.scale_section)
 
         # === Axes Section ===
-        axes_section = CollapsibleSection("Axes")
+        axes_section = CollapsibleSection("Axes", start_collapsed=True)
 
         self.config_axes_btn = QPushButton("Configure Axes...")
         self.config_axes_btn.clicked.connect(
@@ -484,11 +478,251 @@ class Sidebar(QWidget):
         self.flip_y_btn.clicked.connect(lambda: self._emit('flip_y'))
         flip_layout.addWidget(self.flip_y_btn)
         axes_section.add_layout(flip_layout)
+        
+        # Interchange X and Y axes
+        self.interchange_btn = QPushButton("Interchange x ⇄ y")
+        self.interchange_btn.setToolTip("Swap X and Y axes and transpose data")
+        self.interchange_btn.clicked.connect(lambda: self._emit('interchange_xy'))
+        axes_section.add_widget(self.interchange_btn)
 
         self.scroll_layout.addWidget(axes_section)
 
+        # === Appearance Section (merged with former Ticks section) ===
+        appearance_section = CollapsibleSection("Appearance", start_collapsed=True)
+
+        # Show Grid
+        self.grid_checkbox = QCheckBox("Show Grid")
+        self.grid_checkbox.setChecked(True)
+        self.grid_checkbox.toggled.connect(self._on_grid_toggled)
+        appearance_section.add_widget(self.grid_checkbox)
+
+        # Grid width
+        grid_width_layout = QHBoxLayout()
+        grid_width_layout.addWidget(QLabel("Grid Width:"))
+        self.grid_width_spin = QDoubleSpinBox()
+        self.grid_width_spin.setRange(0.1, 5.0)
+        self.grid_width_spin.setValue(0.5)
+        self.grid_width_spin.setSingleStep(0.1)
+        self.grid_width_spin.valueChanged.connect(self._on_grid_width_changed)
+        grid_width_layout.addWidget(self.grid_width_spin)
+        appearance_section.add_layout(grid_width_layout)
+
+        # Tick size
+        tick_size_layout = QHBoxLayout()
+        tick_size_layout.addWidget(QLabel("Tick Size:"))
+        self.tick_size_spin = QDoubleSpinBox()
+        self.tick_size_spin.setRange(0, 20.0)
+        self.tick_size_spin.setValue(6.0)
+        self.tick_size_spin.setSingleStep(1.0)
+        self.tick_size_spin.valueChanged.connect(self._on_tick_size_changed)
+        tick_size_layout.addWidget(self.tick_size_spin)
+        appearance_section.add_layout(tick_size_layout)
+
+        # Tick width
+        tick_width_layout = QHBoxLayout()
+        tick_width_layout.addWidget(QLabel("Tick Width:"))
+        self.tick_width_spin = QDoubleSpinBox()
+        self.tick_width_spin.setRange(0.1, 5.0)
+        self.tick_width_spin.setValue(1.0)
+        self.tick_width_spin.setSingleStep(0.5)
+        self.tick_width_spin.valueChanged.connect(self._on_tick_width_changed)
+        tick_width_layout.addWidget(self.tick_width_spin)
+        appearance_section.add_layout(tick_width_layout)
+
+        # Tick font size
+        tick_font_layout = QHBoxLayout()
+        tick_font_layout.addWidget(QLabel("Tick Font:"))
+        self.tick_font_spin = QDoubleSpinBox()
+        self.tick_font_spin.setRange(4, 20)
+        self.tick_font_spin.setValue(10.0)
+        self.tick_font_spin.setSingleStep(1.0)
+        self.tick_font_spin.valueChanged.connect(self._on_tick_font_size_changed)
+        tick_font_layout.addWidget(self.tick_font_spin)
+        appearance_section.add_layout(tick_font_layout)
+
+        # X tick count
+        x_tick_layout = QHBoxLayout()
+        x_tick_layout.addWidget(QLabel("X Ticks:"))
+        self.x_tick_spin = QSpinBox()
+        self.x_tick_spin.setRange(0, 20)
+        self.x_tick_spin.setValue(0)
+        self.x_tick_spin.setSpecialValueText("Auto")
+        self.x_tick_spin.setToolTip("Number of X-axis ticks (0 = auto)")
+        self.x_tick_spin.valueChanged.connect(self._on_x_tick_count_changed)
+        x_tick_layout.addWidget(self.x_tick_spin)
+        appearance_section.add_layout(x_tick_layout)
+
+        # Y tick count
+        y_tick_layout = QHBoxLayout()
+        y_tick_layout.addWidget(QLabel("Y Ticks:"))
+        self.y_tick_spin = QSpinBox()
+        self.y_tick_spin.setRange(0, 20)
+        self.y_tick_spin.setValue(0)
+        self.y_tick_spin.setSpecialValueText("Auto")
+        self.y_tick_spin.setToolTip("Number of Y-axis ticks (0 = auto)")
+        self.y_tick_spin.valueChanged.connect(self._on_y_tick_count_changed)
+        y_tick_layout.addWidget(self.y_tick_spin)
+        appearance_section.add_layout(y_tick_layout)
+
+        # Separator
+        appearance_section.add_widget(QLabel(""))  # spacer
+
+        # X label
+        x_label_layout = QVBoxLayout()
+        x_label_layout.addWidget(QLabel("X Label:"))
+        self.x_label_edit = QLineEdit()
+        self.x_label_edit.setPlaceholderText("(use default)")
+        self.x_label_edit.textChanged.connect(self._on_x_label_changed)
+        x_label_layout.addWidget(self.x_label_edit)
+        appearance_section.add_layout(x_label_layout)
+
+        # Y label
+        y_label_layout = QVBoxLayout()
+        y_label_layout.addWidget(QLabel("Y Label:"))
+        self.y_label_edit = QLineEdit()
+        self.y_label_edit.setPlaceholderText("(use default)")
+        self.y_label_edit.textChanged.connect(self._on_y_label_changed)
+        y_label_layout.addWidget(self.y_label_edit)
+        appearance_section.add_layout(y_label_layout)
+
+        # Z label (for 2D plots - colorbar label)
+        self.z_label_widget = QWidget()
+        z_label_layout = QVBoxLayout(self.z_label_widget)
+        z_label_layout.setContentsMargins(0, 0, 0, 0)
+        z_label_layout.addWidget(QLabel("Z Label (colorbar):"))
+        self.z_label_edit = QLineEdit()
+        self.z_label_edit.setPlaceholderText("(use default)")
+        self.z_label_edit.textChanged.connect(self._on_z_label_changed)
+        z_label_layout.addWidget(self.z_label_edit)
+        appearance_section.add_widget(self.z_label_widget)
+
+        # Label size
+        label_size_layout = QHBoxLayout()
+        label_size_layout.addWidget(QLabel("Label Size:"))
+        self.label_size_spin = QDoubleSpinBox()
+        self.label_size_spin.setRange(6, 24)
+        self.label_size_spin.setValue(12.0)
+        self.label_size_spin.setSingleStep(1.0)
+        self.label_size_spin.valueChanged.connect(self._on_label_size_changed)
+        label_size_layout.addWidget(self.label_size_spin)
+        appearance_section.add_layout(label_size_layout)
+
+        # Separator
+        appearance_section.add_widget(QLabel(""))  # spacer
+
+        # Title
+        title_layout = QVBoxLayout()
+        title_layout.addWidget(QLabel("Title:"))
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("(no title)")
+        self.title_edit.textChanged.connect(self._on_title_changed)
+        title_layout.addWidget(self.title_edit)
+        appearance_section.add_layout(title_layout)
+
+        # Title size
+        title_size_layout = QHBoxLayout()
+        title_size_layout.addWidget(QLabel("Title Size:"))
+        self.title_size_spin = QDoubleSpinBox()
+        self.title_size_spin.setRange(6, 30)
+        self.title_size_spin.setValue(14.0)
+        self.title_size_spin.setSingleStep(1.0)
+        self.title_size_spin.valueChanged.connect(self._on_title_size_changed)
+        title_size_layout.addWidget(self.title_size_spin)
+        appearance_section.add_layout(title_size_layout)
+
+        # Separator
+        appearance_section.add_widget(QLabel(""))  # spacer
+
+        # Line color and Marker color side by side
+        colors_layout = QHBoxLayout()
+        
+        # Line color
+        line_color_layout = QVBoxLayout()
+        line_color_layout.addWidget(QLabel("Line Color:"))
+        self.color_button = QPushButton()
+        self.color_button.setFixedSize(50, 24)
+        self.color_button.setStyleSheet(f"background-color: {self.settings.line_color};")
+        self.color_button.clicked.connect(self._pick_color)
+        line_color_layout.addWidget(self.color_button)
+        colors_layout.addLayout(line_color_layout)
+        
+        # Marker color
+        marker_color_layout = QVBoxLayout()
+        marker_color_layout.addWidget(QLabel("Marker Color:"))
+        self.marker_color_button = QPushButton()
+        self.marker_color_button.setFixedSize(50, 24)
+        self.marker_color_button.setStyleSheet(f"background-color: {self.settings.marker_color};")
+        self.marker_color_button.clicked.connect(self._pick_marker_color)
+        marker_color_layout.addWidget(self.marker_color_button)
+        colors_layout.addLayout(marker_color_layout)
+        
+        colors_layout.addStretch()
+        appearance_section.add_layout(colors_layout)
+
+        # Line width
+        lw_layout = QHBoxLayout()
+        lw_layout.addWidget(QLabel("Line Width:"))
+        self.linewidth_spin = QDoubleSpinBox()
+        self.linewidth_spin.setRange(0, 5.0)
+        self.linewidth_spin.setValue(1.5)
+        self.linewidth_spin.setSingleStep(0.5)
+        self.linewidth_spin.valueChanged.connect(self._on_linewidth_changed)
+        lw_layout.addWidget(self.linewidth_spin)
+        appearance_section.add_layout(lw_layout)
+
+        # Marker style
+        marker_layout = QHBoxLayout()
+        marker_layout.addWidget(QLabel("Marker:"))
+        self.marker_combo = QComboBox()
+        # Marker styles: (display name, matplotlib marker code)
+        self.marker_styles = [
+            ('None', 'None'),
+            ('Circle', 'o'),
+            ('Square', 's'),
+            ('Triangle Up', '^'),
+            ('Triangle Down', 'v'),
+            ('Diamond', 'D'),
+            ('Plus', '+'),
+            ('Cross', 'x'),
+            ('Star', '*'),
+            ('Point', '.'),
+        ]
+        for name, _ in self.marker_styles:
+            self.marker_combo.addItem(name)
+        self.marker_combo.currentIndexChanged.connect(self._on_marker_style_changed)
+        marker_layout.addWidget(self.marker_combo)
+        appearance_section.add_layout(marker_layout)
+
+        # Marker size
+        ms_layout = QHBoxLayout()
+        ms_layout.addWidget(QLabel("Marker Size:"))
+        self.markersize_spin = QDoubleSpinBox()
+        self.markersize_spin.setRange(0, 20.0)
+        self.markersize_spin.setValue(4.0)
+        self.markersize_spin.setSingleStep(1.0)
+        self.markersize_spin.valueChanged.connect(self._on_markersize_changed)
+        ms_layout.addWidget(self.markersize_spin)
+        appearance_section.add_layout(ms_layout)
+
+        # Separator
+        appearance_section.add_widget(QLabel(""))  # spacer
+
+        # Figure size button
+        self.figsize_btn = QPushButton("Figure Size...")
+        self.figsize_btn.setToolTip("Change figure dimensions")
+        self.figsize_btn.clicked.connect(lambda: self._emit('change_figsize'))
+        appearance_section.add_widget(self.figsize_btn)
+
+        # Set axis limits button
+        self.set_limits_btn = QPushButton("Set Limits...")
+        self.set_limits_btn.setToolTip("Manually set X and Y axis limits")
+        self.set_limits_btn.clicked.connect(lambda: self._emit('set_limits'))
+        appearance_section.add_widget(self.set_limits_btn)
+
+        self.scroll_layout.addWidget(appearance_section)
+
         # === Export Section ===
-        export_section = CollapsibleSection("Export")
+        export_section = CollapsibleSection("Export", start_collapsed=True)
 
         self.copy_btn = QPushButton("📋 Copy to Clipboard")
         self.copy_btn.clicked.connect(lambda: self._emit('copy_clipboard'))
@@ -514,12 +748,11 @@ class Sidebar(QWidget):
         self.scroll_layout.addWidget(export_section)
 
         # === Metadata Section ===
-        self.metadata_section = CollapsibleSection("Metadata")
+        self.metadata_section = CollapsibleSection("Metadata", start_collapsed=True)
         self.metadata_label = QLabel("No file loaded")
         self.metadata_label.setWordWrap(True)
         self.metadata_label.setStyleSheet("font-size: 10px; color: #000000;")
         self.metadata_section.add_widget(self.metadata_label)
-        self.metadata_section._toggle()  # Start collapsed
 
         self.scroll_layout.addWidget(self.metadata_section)
 
@@ -553,6 +786,22 @@ class Sidebar(QWidget):
         self.settings.line_width = width
         self._emit('settings_changed', self.settings)
 
+    def _on_marker_style_changed(self, index: int):
+        _, marker_code = self.marker_styles[index]
+        self.settings.marker_style = marker_code
+        self._emit('settings_changed', self.settings)
+
+    def _on_markersize_changed(self, size: float):
+        self.settings.marker_size = size
+        self._emit('settings_changed', self.settings)
+
+    def _pick_marker_color(self):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.settings.marker_color = color.name()
+            self.marker_color_button.setStyleSheet(f"background-color: {color.name()};")
+            self._emit('settings_changed', self.settings)
+
     def _on_grid_toggled(self, enabled: bool):
         self.settings.grid_enabled = enabled
         self._emit('settings_changed', self.settings)
@@ -571,6 +820,55 @@ class Sidebar(QWidget):
         self.vmin_spin.setSingleStep(step)
         self.vmax_spin.setSingleStep(step)
 
+    # Tick settings callbacks
+    def _on_tick_size_changed(self, size: float):
+        self.settings.tick_size = size
+        self._emit('settings_changed', self.settings)
+
+    def _on_tick_width_changed(self, width: float):
+        self.settings.tick_width = width
+        self._emit('settings_changed', self.settings)
+
+    def _on_tick_font_size_changed(self, size: float):
+        self.settings.tick_font_size = size
+        self._emit('settings_changed', self.settings)
+
+    def _on_grid_width_changed(self, width: float):
+        self.settings.grid_width = width
+        self._emit('settings_changed', self.settings)
+
+    def _on_x_tick_count_changed(self, count: int):
+        self.settings.x_tick_count = count
+        self._emit('settings_changed', self.settings)
+
+    def _on_y_tick_count_changed(self, count: int):
+        self.settings.y_tick_count = count
+        self._emit('settings_changed', self.settings)
+
+    def _on_x_label_changed(self, text: str):
+        self.settings.x_label_text = text
+        self._emit('settings_changed', self.settings)
+
+    def _on_y_label_changed(self, text: str):
+        self.settings.y_label_text = text
+        self._emit('settings_changed', self.settings)
+
+    def _on_z_label_changed(self, text: str):
+        self.settings.z_label_text = text
+        self._emit('settings_changed', self.settings)
+
+    def _on_label_size_changed(self, size: float):
+        self.settings.label_size = size
+        self._emit('settings_changed', self.settings)
+
+    def _on_title_changed(self, text: str):
+        self.settings.title_text = text
+        self._emit('settings_changed', self.settings)
+
+    def _on_title_size_changed(self, size: float):
+        self.settings.title_size = size
+        self._emit('settings_changed', self.settings)
+
     def set_transforms(self, transforms: List[Tuple[str, str, Callable]]):
         """Update available transforms."""
         self.transform_combo.clear()
@@ -584,9 +882,9 @@ class Sidebar(QWidget):
     def set_2d_mode(self, is_2d: bool):
         """Show/hide 2D-specific controls."""
         self.scale_section.setVisible(is_2d)
-        self.cmap_combo.setVisible(is_2d)
         self.linecuts_checkbox.setVisible(is_2d)
-        self.flip_y_btn.setVisible(is_2d)  # Only show Y flip for 2D plots
+        self.z_label_widget.setVisible(is_2d)
+        # Flip Y and Interchange are now available for both 1D and 2D plots
     
     def update_scale_range(self, vmin: float, vmax: float):
         """Update the scale spinboxes with data range."""
@@ -879,6 +1177,266 @@ class HDF5DataSource:
                          ).translate({ord(c): None for c in '{}"'})
 
 
+class StitchedDataSource:
+    """Data source for stitched 2D HDF5 files - stores multiple datasets."""
+    
+    def __init__(self, datasets: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+                 spec: ExperimentSpec, metadata: dict, file_paths: List[str]):
+        """
+        Args:
+            datasets: List of (xs, ys, data) tuples, one per file
+            spec: ExperimentSpec for the experiment type
+            metadata: Metadata from first file
+            file_paths: List of file paths
+        """
+        self.datasets = datasets  # List of (xs, ys, data) tuples
+        self.spec = spec
+        self.metadata = metadata.copy()
+        self.file_paths = file_paths
+        self.file_path = file_paths[0]  # Primary file
+        
+        # Update metadata to indicate stitching
+        self.metadata['Stitched'] = f"{len(file_paths)} files"
+        self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in file_paths])
+        
+        # Compute combined axis ranges across all datasets
+        all_xs = np.concatenate([d[0] for d in datasets])
+        all_ys = np.concatenate([d[1] for d in datasets])
+        self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
+        self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+        
+        # For compatibility with existing code, expose first dataset's axes
+        self.xs = datasets[0][0]
+        self.ys = datasets[0][1]
+    
+    def close(self):
+        """No-op for stitched data (in-memory, nothing to close)."""
+        pass
+    
+    def is_stitched(self) -> bool:
+        """Return True to indicate this is stitched data."""
+        return True
+    
+    def get_axes(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return first dataset's axes for compatibility."""
+        return self.datasets[0][0], self.datasets[0][1]
+    
+    def get_data(self) -> np.ndarray:
+        """Return first dataset's data for compatibility."""
+        return self.datasets[0][2]
+    
+    def get_all_datasets(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Get all (xs, ys, data) tuples for stitched plotting."""
+        return self.datasets
+    
+    def get_combined_xlim(self) -> Tuple[float, float]:
+        """Get combined x-axis limits across all datasets."""
+        return self._combined_xlim
+    
+    def get_combined_ylim(self) -> Tuple[float, float]:
+        """Get combined y-axis limits across all datasets."""
+        return self._combined_ylim
+    
+    @property
+    def file_info(self) -> str:
+        return f"Stitched: {len(self.file_paths)} files"
+    
+    @property
+    def title(self) -> str:
+        return f"Stitched: {len(self.file_paths)} files"
+    
+    @property
+    def metadata_str(self) -> str:
+        return json.dumps(self.metadata, indent=2, separators=('', ': ')
+                         ).translate({ord(c): None for c in '{}"'})
+
+
+class StitchDropArea(QListWidget):
+    """Drop area for HDF5 files to stitch."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDrop)
+        self.setDefaultDropAction(Qt.CopyAction)
+        self.setMinimumHeight(150)
+        self.setStyleSheet("""
+            QListWidget {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                background-color: #f9f9f9;
+            }
+            QListWidget:hover {
+                border-color: #666;
+            }
+        """)
+        
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            # Check if any files are .h5
+            for url in event.mimeData().urls():
+                if url.toLocalFile().endswith('.h5'):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+        
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+            
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                file_path = url.toLocalFile()
+                if file_path.endswith('.h5'):
+                    # Check if already in list
+                    existing = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
+                    if file_path not in existing:
+                        item = QListWidgetItem(os.path.basename(file_path))
+                        item.setData(Qt.UserRole, file_path)
+                        self.addItem(item)
+            event.acceptProposedAction()
+
+
+class StitchDialog(QDialog):
+    """Dialog for stitching multiple HDF5 files together."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.stitch_files = []  # List of validated file paths
+        self.detected_expt_type = None  # Set during validation
+        self.detected_spec = None  # The ExperimentSpec for the detected type
+        
+        self.setWindowTitle("Stitch HDF5 Files")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(350)
+        self._setup_ui()
+        
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Instructions
+        instructions = QLabel(
+            "Drag and drop .h5 files below to stitch together.\n"
+            "All files must be the same 2D experiment type (at least 2 files required)."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        
+        # Drop area
+        self.drop_area = StitchDropArea()
+        layout.addWidget(self.drop_area)
+        
+        # Add file button
+        add_btn = QPushButton("Add Files...")
+        add_btn.clicked.connect(self._add_files)
+        layout.addWidget(add_btn)
+        
+        # Remove selected button
+        remove_btn = QPushButton("Remove Selected")
+        remove_btn.clicked.connect(self._remove_selected)
+        layout.addWidget(remove_btn)
+        
+        # Status label
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: red;")
+        layout.addWidget(self.status_label)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.stitch_btn = QPushButton("Stitch")
+        self.stitch_btn.clicked.connect(self._validate_and_accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.stitch_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+    def _add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select HDF5 Files", "", "HDF5 Files (*.h5)"
+        )
+        for file_path in files:
+            existing = [self.drop_area.item(i).data(Qt.UserRole) 
+                       for i in range(self.drop_area.count())]
+            if file_path not in existing:
+                item = QListWidgetItem(os.path.basename(file_path))
+                item.setData(Qt.UserRole, file_path)
+                self.drop_area.addItem(item)
+                
+    def _remove_selected(self):
+        for item in self.drop_area.selectedItems():
+            self.drop_area.takeItem(self.drop_area.row(item))
+            
+    def _validate_and_accept(self):
+        """Validate all files are same 2D experiment type and accept."""
+        self.stitch_files = []
+        self.status_label.setText("")
+        
+        if self.drop_area.count() < 2:
+            self.status_label.setText("Please add at least 2 files to stitch.")
+            return
+        
+        first_expt_type = None
+        
+        for i in range(self.drop_area.count()):
+            file_path = self.drop_area.item(i).data(Qt.UserRole)
+            
+            try:
+                with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                    # Try to detect experiment type - use same logic as load_file
+                    try:
+                        metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+                    except:
+                        metadata = {'Expt ID': os.path.basename(file_path)}
+                    
+                    expt_id = metadata.get('Expt ID', '')
+                    # Extract experiment type from ID
+                    file_expt_type = None
+                    for exp_type in EXPERIMENT_REGISTRY:
+                        if exp_type in expt_id:
+                            file_expt_type = exp_type
+                            break
+                    
+                    if file_expt_type is None:
+                        self.status_label.setText(
+                            f"Cannot determine experiment type for:\n{os.path.basename(file_path)}\n"
+                            f"(Expt ID: {expt_id})"
+                        )
+                        return
+                    
+                    # Check it's a 2D type
+                    spec = EXPERIMENT_REGISTRY[file_expt_type]
+                    if spec.exp_type not in (ExperimentType.CW_2D, ExperimentType.RFSOC_2D, ExperimentType.CUSTOM_2D):
+                        self.status_label.setText(
+                            f"Stitch only supports 2D data.\n"
+                            f"{os.path.basename(file_path)} is not a 2D experiment."
+                        )
+                        return
+                    
+                    # Check all files match each other
+                    if first_expt_type is None:
+                        first_expt_type = file_expt_type
+                    elif file_expt_type != first_expt_type:
+                        self.status_label.setText(
+                            f"Type mismatch: {os.path.basename(file_path)}\n"
+                            f"Expected: {first_expt_type}, Got: {file_expt_type}"
+                        )
+                        return
+                        
+                    self.stitch_files.append(file_path)
+                    
+            except Exception as e:
+                self.status_label.setText(f"Error reading {os.path.basename(file_path)}:\n{str(e)}")
+                return
+        
+        self.detected_expt_type = first_expt_type
+        self.detected_spec = EXPERIMENT_REGISTRY[first_expt_type]
+        self.accept()
+
+
 class PlotWidget1D(QWidget):
     """Widget for 1D plots."""
 
@@ -899,12 +1457,18 @@ class PlotWidget1D(QWidget):
         
         # Store full data range for reset (preserve original array order)
         self._full_xlim = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
+        self._full_ylim = None  # Will be computed from data in update_plot
         
-        # Track if X axis is flipped (for user-initiated flips)
+        # Track if axes are flipped (for user-initiated flips)
         self._x_flipped = False
+        self._y_flipped = False
+        
+        # Interchange axes state
+        self._interchanged = False
         
         # Current zoom limits (None = full range)
         self._xlim = None
+        self._ylim = None
         
         # Zoom mode state
         self._zoom_mode = False
@@ -952,11 +1516,35 @@ class PlotWidget1D(QWidget):
     def reset_zoom(self):
         """Reset to full data range."""
         self._xlim = None
+        self._ylim = None
         self.update_plot()
 
     def flip_x(self):
         """Flip the X-axis direction."""
         self._x_flipped = not self._x_flipped
+        self.update_plot()
+
+    def flip_y(self):
+        """Flip the Y-axis direction."""
+        self._y_flipped = not self._y_flipped
+        self.update_plot()
+
+    def interchange_xy(self):
+        """Interchange X and Y axes."""
+        # Toggle the interchange flag
+        self._interchanged = not self._interchanged
+        
+        # Swap flip states
+        self._x_flipped, self._y_flipped = self._y_flipped, self._x_flipped
+        
+        # Swap zoom limits if set
+        self._xlim, self._ylim = self._ylim, self._xlim
+        
+        # Swap full limits (will be recomputed on next update if needed)
+        self._full_xlim, self._full_ylim = self._full_ylim, self._full_xlim
+        
+        # Note: axis labels are computed dynamically in update_plot based on _interchanged flag
+        
         self.update_plot()
 
     def set_callout_mode(self, enabled: bool):
@@ -991,9 +1579,7 @@ class PlotWidget1D(QWidget):
         if self._callout_mode and event.button == 1:
             if event.xdata is not None:
                 # Find nearest data point
-                idx = np.argmin(np.abs(self.xs - event.xdata))
-                x_val = self.xs[idx]
-                # Get current y value from transformed data
+                # Find nearest data point based on interchange state
                 data = self.data_source.get_data()
                 _, _, transform = self.transforms[self._current_transform]
                 try:
@@ -1002,9 +1588,18 @@ class PlotWidget1D(QWidget):
                     zs = np.abs(data)
                 # Convert Inf to NaN
                 zs = np.where(np.isinf(zs), np.nan, zs)
-                y_val = zs[idx]
                 
-                # Store callout data (including NaN values)
+                if self._interchanged:
+                    # When interchanged: zs on X-axis, xs on Y-axis
+                    # Use event.ydata to find nearest xs value
+                    idx = np.argmin(np.abs(self.xs - event.ydata))
+                else:
+                    # Normal: xs on X-axis, zs on Y-axis
+                    idx = np.argmin(np.abs(self.xs - event.xdata))
+                
+                # Always store original data values (x from xs, y from zs)
+                x_val = self.xs[idx]
+                y_val = zs[idx]
                 self._callouts.append((x_val, y_val))
                 self.update_plot()
             return
@@ -1018,10 +1613,7 @@ class PlotWidget1D(QWidget):
         # Callout mode hover
         if self._callout_mode and not self._zoom_mode:
             if event.inaxes == self.ax and event.xdata is not None:
-                # Find nearest data point
-                idx = np.argmin(np.abs(self.xs - event.xdata))
-                x_val = self.xs[idx]
-                # Get current y value from transformed data
+                # Get transformed data
                 data = self.data_source.get_data()
                 _, _, transform = self.transforms[self._current_transform]
                 try:
@@ -1030,7 +1622,26 @@ class PlotWidget1D(QWidget):
                     zs = np.abs(data)
                 # Convert Inf to NaN
                 zs = np.where(np.isinf(zs), np.nan, zs)
+                
+                if self._interchanged:
+                    # When interchanged: zs on X-axis, xs on Y-axis
+                    # Use event.ydata to find nearest xs value
+                    idx = np.argmin(np.abs(self.xs - event.ydata))
+                else:
+                    # Normal: xs on X-axis, zs on Y-axis
+                    idx = np.argmin(np.abs(self.xs - event.xdata))
+                
+                # Original data values
+                x_val = self.xs[idx]
                 y_val = zs[idx]
+                
+                # Compute plot position based on interchange state
+                if self._interchanged:
+                    plot_x = y_val if not np.isnan(y_val) else 0
+                    plot_y = x_val
+                else:
+                    plot_x = x_val
+                    plot_y = y_val if not np.isnan(y_val) else 0
                 
                 # Remove old hover annotation
                 if self._hover_annotation is not None:
@@ -1043,7 +1654,7 @@ class PlotWidget1D(QWidget):
                 y_str = 'NaN' if np.isnan(y_val) else f'{y_val:.4g}'
                 self._hover_annotation = self.ax.annotate(
                     f'x={x_val:.4g}\ny={y_str}',
-                    xy=(x_val, y_val if not np.isnan(y_val) else 0),
+                    xy=(plot_x, plot_y),
                     xytext=(10, 10), textcoords='offset points',
                     fontsize=9,
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.8),
@@ -1153,36 +1764,127 @@ class PlotWidget1D(QWidget):
 
             # Convert Inf to NaN (matplotlib will skip NaN values in line plots)
             zs = np.where(np.isinf(zs), np.nan, zs)
-
-            self.ax.plot(self.xs, zs, color=self.settings.line_color,
-                         linewidth=self.settings.line_width)
-            self.ax.set_xlabel(self.data_source.spec.x_label)
-            self.ax.set_ylabel(ylabel)
             
-            # Apply zoom limits or full range with flip consideration
+            # Compute full y limits from data (ignoring NaN)
+            valid_zs = zs[~np.isnan(zs)]
+            if len(valid_zs) > 0:
+                data_ymin = float(np.min(valid_zs))
+                data_ymax = float(np.max(valid_zs))
+                # Add padding to y limits
+                y_range = data_ymax - data_ymin
+                if y_range > 0:
+                    padding = y_range * self.settings.y_padding
+                else:
+                    padding = abs(data_ymax) * self.settings.y_padding if data_ymax != 0 else 0.1
+                data_ylim = (data_ymin - padding, data_ymax + padding)
+            else:
+                data_ylim = (0, 1)
+            
+            # Update _full_ylim if not interchanged, else it holds x range
+            if not self._interchanged:
+                self._full_ylim = data_ylim
+            
+            # Determine what to plot based on interchange state
+            if self._interchanged:
+                # Swapped: Y-axis shows xs (independent), X-axis shows zs (dependent)
+                plot_x = zs
+                plot_y = self.xs
+                x_label_default = ylabel  # Transform label on X
+                y_label_default = self.data_source.spec.x_label  # Original X label on Y
+                
+                # When interchanged, x limits come from data range, y limits from xs
+                x_full = data_ylim
+                y_full = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
+            else:
+                # Normal: X-axis shows xs, Y-axis shows zs
+                plot_x = self.xs
+                plot_y = zs
+                x_label_default = self.data_source.spec.x_label
+                y_label_default = ylabel
+                
+                x_full = self._full_xlim
+                y_full = data_ylim
+
+            # Build marker kwargs
+            marker_kwargs = {}
+            if self.settings.marker_style != 'None':
+                marker_kwargs['marker'] = self.settings.marker_style
+                marker_kwargs['markersize'] = self.settings.marker_size
+                marker_kwargs['markerfacecolor'] = self.settings.marker_color
+                marker_kwargs['markeredgecolor'] = self.settings.marker_color
+
+            self.ax.plot(plot_x, plot_y, color=self.settings.line_color,
+                         linewidth=self.settings.line_width, **marker_kwargs)
+            
+            # Apply custom or default labels
+            x_label = self.settings.x_label_text if self.settings.x_label_text else x_label_default
+            y_label_text = self.settings.y_label_text if self.settings.y_label_text else y_label_default
+            self.ax.set_xlabel(x_label, fontsize=self.settings.label_size)
+            self.ax.set_ylabel(y_label_text, fontsize=self.settings.label_size)
+            
+            # Apply title if set
+            if self.settings.title_text:
+                self.ax.set_title(self.settings.title_text, fontsize=self.settings.title_size)
+            
+            # Apply tick settings
+            self.ax.tick_params(axis='both', which='major', 
+                               length=self.settings.tick_size, 
+                               width=self.settings.tick_width,
+                               labelsize=self.settings.tick_font_size)
+            
+            # Apply tick count if specified
+            if self.settings.x_tick_count > 0:
+                from matplotlib.ticker import MaxNLocator
+                self.ax.xaxis.set_major_locator(MaxNLocator(nbins=self.settings.x_tick_count))
+            if self.settings.y_tick_count > 0:
+                from matplotlib.ticker import MaxNLocator
+                self.ax.yaxis.set_major_locator(MaxNLocator(nbins=self.settings.y_tick_count))
+            
+            # Apply X limits with flip consideration
             if self._xlim is not None:
                 if self._x_flipped:
                     self.ax.set_xlim(self._xlim[1], self._xlim[0])
                 else:
                     self.ax.set_xlim(self._xlim[0], self._xlim[1])
-            elif len(self.xs) > 1:
+            else:
                 if self._x_flipped:
-                    self.ax.set_xlim(self._full_xlim[1], self._full_xlim[0])
+                    self.ax.set_xlim(x_full[1], x_full[0])
                 else:
-                    self.ax.set_xlim(self._full_xlim[0], self._full_xlim[1])
+                    self.ax.set_xlim(x_full[0], x_full[1])
+            
+            # Apply Y limits with flip consideration
+            if self._ylim is not None:
+                if self._y_flipped:
+                    self.ax.set_ylim(self._ylim[1], self._ylim[0])
+                else:
+                    self.ax.set_ylim(self._ylim[0], self._ylim[1])
+            else:
+                if self._y_flipped:
+                    self.ax.set_ylim(y_full[1], y_full[0])
+                else:
+                    self.ax.set_ylim(y_full[0], y_full[1])
 
             if self.settings.grid_enabled:
-                self.ax.grid(True, alpha=self.settings.grid_alpha)
+                self.ax.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
 
             # Draw callout annotations
+            # Callouts store original data values (x from xs, y from zs)
             for x_val, y_val in self._callouts:
-                # Skip drawing marker if y is NaN (can't plot NaN)
-                if not np.isnan(y_val):
-                    self.ax.plot(x_val, y_val, 'ro', markersize=5)
+                # Compute plot position based on interchange state
+                if self._interchanged:
+                    plot_x = y_val if not np.isnan(y_val) else 0
+                    plot_y = x_val
+                else:
+                    plot_x = x_val
+                    plot_y = y_val if not np.isnan(y_val) else 0
+                
+                # Skip drawing marker if position is NaN
+                if not np.isnan(plot_x) and not np.isnan(plot_y):
+                    self.ax.plot(plot_x, plot_y, 'ro', markersize=5)
                 y_str = 'NaN' if np.isnan(y_val) else f'{y_val:.4g}'
                 ann = self.ax.annotate(
                     f'x={x_val:.4g}\ny={y_str}',
-                    xy=(x_val, y_val if not np.isnan(y_val) else 0),
+                    xy=(plot_x, plot_y),
                     xytext=(10, 10), textcoords='offset points',
                     fontsize=9,
                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='red', alpha=0.9),
@@ -1206,20 +1908,31 @@ class PlotWidget2D(QWidget):
         self.transforms = transforms
         self.settings = settings
         self._current_transform = 0
-        self._show_linecuts = False
         self._colorbar = None
         self._cbar_ax = None
         self._pcm = None
         self._zoom_completed_callback = None
+        
+        # Check if this is stitched data
+        self._is_stitched = hasattr(data_source, 'is_stitched') and data_source.is_stitched()
+        
+        # Disable linecuts for stitched data
+        self._show_linecuts = False
 
         self.figure = plt.figure(figsize=(8, 6))
         self.canvas = FigureCanvas(self.figure)
 
         self.xs, self.ys = data_source.get_axes()
         
-        # Store full data range for reset (preserve original array order)
-        self._full_xlim = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
-        self._full_ylim = (self.ys[0], self.ys[-1]) if len(self.ys) > 1 else (0, 1)
+        # Store full data range for reset
+        if self._is_stitched:
+            # Use combined limits from all datasets
+            self._full_xlim = data_source.get_combined_xlim()
+            self._full_ylim = data_source.get_combined_ylim()
+        else:
+            # Preserve original array order
+            self._full_xlim = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
+            self._full_ylim = (self.ys[0], self.ys[-1]) if len(self.ys) > 1 else (0, 1)
         
         # Track if axes are flipped (for user-initiated flips)
         self._x_flipped = False
@@ -1238,6 +1951,9 @@ class PlotWidget2D(QWidget):
         self._callout_mode = False
         self._callouts = []  # List of (x, y, z) tuples
         self._hover_annotation = None
+        
+        # Interchange axes state
+        self._interchanged = False
 
         # Initialize axes (will be configured in _setup_axes)
         self.ax_2d = None
@@ -1298,6 +2014,44 @@ class PlotWidget2D(QWidget):
         self._y_flipped = not self._y_flipped
         self.update_plot()
 
+    def interchange_xy(self):
+        """Interchange X and Y axes and transpose data."""
+        # Swap xs and ys
+        self.xs, self.ys = self.ys, self.xs
+        
+        # Swap full limits
+        self._full_xlim, self._full_ylim = self._full_ylim, self._full_xlim
+        
+        # Swap current zoom limits if set
+        if self._xlim is not None or self._ylim is not None:
+            self._xlim, self._ylim = self._ylim, self._xlim
+        
+        # Swap flip states
+        self._x_flipped, self._y_flipped = self._y_flipped, self._x_flipped
+        
+        # Toggle the interchange flag for data transposition
+        self._interchanged = not getattr(self, '_interchanged', False)
+        
+        # For stitched data, swap the datasets
+        if self._is_stitched:
+            swapped_datasets = []
+            for xs, ys, data in self.data_source.datasets:
+                swapped_datasets.append((ys, xs, data.T))
+            self.data_source.datasets = swapped_datasets
+            # Also swap combined limits
+            self.data_source._combined_xlim, self.data_source._combined_ylim = \
+                self.data_source._combined_ylim, self.data_source._combined_xlim
+        
+        # Swap axis labels in spec (create a modified copy)
+        spec = self.data_source.spec
+        # Swap x_label and y_label
+        old_x_label = spec.x_label
+        old_y_label = spec.y_label
+        spec.x_label = old_y_label
+        spec.y_label = old_x_label
+        
+        self.update_plot()
+
     def set_callout_mode(self, enabled: bool):
         """Enable or disable callout mode."""
         self._callout_mode = enabled
@@ -1329,26 +2083,56 @@ class PlotWidget2D(QWidget):
         # Callout mode - add annotation on click
         if self._callout_mode and event.button == 1:
             if event.xdata is not None and event.ydata is not None:
-                # Find nearest data point
-                x_idx = np.argmin(np.abs(self.xs - event.xdata))
-                y_idx = np.argmin(np.abs(self.ys - event.ydata))
-                x_val = self.xs[x_idx]
-                y_val = self.ys[y_idx]
-                
-                # Get current z value from transformed data
-                data = self.data_source.get_data()
                 _, _, transform = self.transforms[self._current_transform]
-                try:
-                    zs = transform(data)
-                except:
-                    zs = np.abs(data)
-                # Convert Inf to NaN
-                zs = np.where(np.isinf(zs), np.nan, zs)
-                z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
                 
-                # Store callout data (including NaN values)
-                self._callouts.append((x_val, y_val, z_val))
-                self.update_plot()
+                if self._is_stitched:
+                    # Search across all datasets to find nearest point
+                    best_dist = float('inf')
+                    best_point = None
+                    
+                    for xs, ys, data in self.data_source.get_all_datasets():
+                        x_idx = np.argmin(np.abs(xs - event.xdata))
+                        y_idx = np.argmin(np.abs(ys - event.ydata))
+                        x_val = xs[x_idx]
+                        y_val = ys[y_idx]
+                        dist = (x_val - event.xdata)**2 + (y_val - event.ydata)**2
+                        
+                        if dist < best_dist:
+                            best_dist = dist
+                            try:
+                                zs = transform(data)
+                            except:
+                                zs = np.abs(data)
+                            zs = np.where(np.isinf(zs), np.nan, zs)
+                            z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                            best_point = (x_val, y_val, z_val)
+                    
+                    if best_point:
+                        self._callouts.append(best_point)
+                        self.update_plot()
+                else:
+                    # Single dataset: original behavior
+                    x_idx = np.argmin(np.abs(self.xs - event.xdata))
+                    y_idx = np.argmin(np.abs(self.ys - event.ydata))
+                    x_val = self.xs[x_idx]
+                    y_val = self.ys[y_idx]
+                    
+                    # Get current z value from transformed data
+                    data = self.data_source.get_data()
+                    try:
+                        zs = transform(data)
+                    except:
+                        zs = np.abs(data)
+                    # Convert Inf to NaN
+                    zs = np.where(np.isinf(zs), np.nan, zs)
+                    # Transpose if axes have been interchanged
+                    if getattr(self, '_interchanged', False):
+                        zs = zs.T
+                    z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                    
+                    # Store callout data (including NaN values)
+                    self._callouts.append((x_val, y_val, z_val))
+                    self.update_plot()
             return
         
         # Zoom mode
@@ -1360,22 +2144,53 @@ class PlotWidget2D(QWidget):
         # Callout mode hover
         if self._callout_mode and not self._zoom_mode:
             if event.inaxes == self.ax_2d and event.xdata is not None and event.ydata is not None:
-                # Find nearest data point
-                x_idx = np.argmin(np.abs(self.xs - event.xdata))
-                y_idx = np.argmin(np.abs(self.ys - event.ydata))
-                x_val = self.xs[x_idx]
-                y_val = self.ys[y_idx]
-                
-                # Get current z value from transformed data
-                data = self.data_source.get_data()
                 _, _, transform = self.transforms[self._current_transform]
-                try:
-                    zs = transform(data)
-                except:
-                    zs = np.abs(data)
-                # Convert Inf to NaN
-                zs = np.where(np.isinf(zs), np.nan, zs)
-                z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                
+                if self._is_stitched:
+                    # Search across all datasets to find nearest point
+                    best_dist = float('inf')
+                    best_point = None
+                    
+                    for xs, ys, data in self.data_source.get_all_datasets():
+                        x_idx = np.argmin(np.abs(xs - event.xdata))
+                        y_idx = np.argmin(np.abs(ys - event.ydata))
+                        x_val = xs[x_idx]
+                        y_val = ys[y_idx]
+                        dist = (x_val - event.xdata)**2 + (y_val - event.ydata)**2
+                        
+                        if dist < best_dist:
+                            best_dist = dist
+                            try:
+                                zs = transform(data)
+                            except:
+                                zs = np.abs(data)
+                            zs = np.where(np.isinf(zs), np.nan, zs)
+                            z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                            best_point = (x_val, y_val, z_val)
+                    
+                    if best_point:
+                        x_val, y_val, z_val = best_point
+                    else:
+                        return
+                else:
+                    # Single dataset: original behavior
+                    x_idx = np.argmin(np.abs(self.xs - event.xdata))
+                    y_idx = np.argmin(np.abs(self.ys - event.ydata))
+                    x_val = self.xs[x_idx]
+                    y_val = self.ys[y_idx]
+                    
+                    # Get current z value from transformed data
+                    data = self.data_source.get_data()
+                    try:
+                        zs = transform(data)
+                    except:
+                        zs = np.abs(data)
+                    # Convert Inf to NaN
+                    zs = np.where(np.isinf(zs), np.nan, zs)
+                    # Transpose if axes have been interchanged
+                    if getattr(self, '_interchanged', False):
+                        zs = zs.T
+                    z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
                 
                 # Remove old hover annotation
                 if self._hover_annotation is not None:
@@ -1525,7 +2340,9 @@ class PlotWidget2D(QWidget):
             self.slider_x = None
 
     def set_show_linecuts(self, show: bool):
-        """Toggle linecut visibility."""
+        """Toggle linecut visibility. Disabled for stitched data."""
+        if self._is_stitched:
+            return  # Linecuts not supported for stitched data
         if show != self._show_linecuts:
             self._show_linecuts = show
             self._setup_axes()
@@ -1542,12 +2359,24 @@ class PlotWidget2D(QWidget):
     def get_current_data_range(self) -> Tuple[float, float]:
         """Get the current transformed data range."""
         try:
-            data = self.data_source.get_data()
             _, _, transform = self.transforms[self._current_transform]
-            zs = transform(data)
-            # Convert Inf to NaN, then use nanmin/nanmax to ignore NaN values
-            zs = np.where(np.isinf(zs), np.nan, zs)
-            return float(np.nanmin(zs)), float(np.nanmax(zs))
+            
+            if self._is_stitched:
+                # Compute min/max across all datasets
+                all_mins = []
+                all_maxs = []
+                for xs, ys, data in self.data_source.get_all_datasets():
+                    zs = transform(data)
+                    zs = np.where(np.isinf(zs), np.nan, zs)
+                    all_mins.append(float(np.nanmin(zs)))
+                    all_maxs.append(float(np.nanmax(zs)))
+                return min(all_mins), max(all_maxs)
+            else:
+                data = self.data_source.get_data()
+                zs = transform(data)
+                # Convert Inf to NaN, then use nanmin/nanmax to ignore NaN values
+                zs = np.where(np.isinf(zs), np.nan, zs)
+                return float(np.nanmin(zs)), float(np.nanmax(zs))
         except:
             return 0.0, 1.0
 
@@ -1573,35 +2402,66 @@ class PlotWidget2D(QWidget):
                 y_idx = 0
                 x_idx = 0
 
-            data = self.data_source.get_data()
-            try:
-                zs = transform(data)
-            except Exception as e:
-                print(f"Transform error: {e}")
-                zs = np.abs(data)
-
-            # Convert Inf to NaN (pcolormesh will show NaN as transparent/empty)
-            zs = np.where(np.isinf(zs), np.nan, zs)
-
-            y_idx = min(y_idx, zs.shape[0] - 1) if zs.ndim > 1 else 0
-            x_idx = min(x_idx, zs.shape[1] - 1) if zs.ndim > 1 else min(x_idx, len(zs) - 1)
-
-            # Get color limits
-            vmin, vmax = self.settings.get_clim(zs)
-
-            # Get axis labels for titles
-            y_label = self.data_source.spec.y_label or 'Y'
-            x_label = self.data_source.spec.x_label or 'X'
+            # Get axis labels for titles (use custom if set, otherwise spec defaults)
+            y_label_default = self.data_source.spec.y_label or 'Y'
+            x_label_default = self.data_source.spec.x_label or 'X'
+            
+            y_label = self.settings.y_label_text if self.settings.y_label_text else y_label_default
+            x_label = self.settings.x_label_text if self.settings.x_label_text else x_label_default
 
             # 2D plot - disable autoscaling so our limits are respected
             self.ax_2d.set_autoscale_on(False)
             
-            pcm = self.ax_2d.pcolormesh(self.xs, self.ys, zs,
-                                         cmap=self.settings.colormap,
-                                         vmin=vmin, vmax=vmax)
+            if self._is_stitched:
+                # Stitched data: plot each dataset with separate pcolormesh calls
+                # First compute global vmin/vmax across all datasets
+                vmin, vmax = self.get_current_data_range()
+                if self.settings.vmin is not None:
+                    vmin = self.settings.vmin
+                if self.settings.vmax is not None:
+                    vmax = self.settings.vmax
+                
+                pcm = None
+                for xs, ys, data in self.data_source.get_all_datasets():
+                    try:
+                        zs = transform(data)
+                    except Exception as e:
+                        print(f"Transform error: {e}")
+                        zs = np.abs(data)
+                    
+                    # Convert Inf to NaN
+                    zs = np.where(np.isinf(zs), np.nan, zs)
+                    
+                    pcm = self.ax_2d.pcolormesh(xs, ys, zs,
+                                                 cmap=self.settings.colormap,
+                                                 vmin=vmin, vmax=vmax)
+            else:
+                # Single dataset: original behavior
+                data = self.data_source.get_data()
+                try:
+                    zs = transform(data)
+                except Exception as e:
+                    print(f"Transform error: {e}")
+                    zs = np.abs(data)
+
+                # Convert Inf to NaN (pcolormesh will show NaN as transparent/empty)
+                zs = np.where(np.isinf(zs), np.nan, zs)
+                
+                # Transpose if axes have been interchanged
+                if getattr(self, '_interchanged', False):
+                    zs = zs.T
+
+                y_idx = min(y_idx, zs.shape[0] - 1) if zs.ndim > 1 else 0
+                x_idx = min(x_idx, zs.shape[1] - 1) if zs.ndim > 1 else min(x_idx, len(zs) - 1)
+
+                # Get color limits
+                vmin, vmax = self.settings.get_clim(zs)
+
+                pcm = self.ax_2d.pcolormesh(self.xs, self.ys, zs,
+                                             cmap=self.settings.colormap,
+                                             vmin=vmin, vmax=vmax)
             
-            # Immediately set axis limits to match data order (before anything else)
-            # This ensures the plot respects xs[0]->xs[-1] and ys[0]->ys[-1] order
+            # Set axis limits to match data order
             if self._xlim is not None:
                 if self._x_flipped:
                     self.ax_2d.set_xlim(self._xlim[1], self._xlim[0])
@@ -1625,28 +2485,57 @@ class PlotWidget2D(QWidget):
                     self.ax_2d.set_ylim(self._full_ylim[0], self._full_ylim[1])
             
             # Add colorbar to dedicated axes
-            self._colorbar = self.figure.colorbar(pcm, cax=self._cbar_ax)
-            self._cbar_ax.set_ylabel(ylabel)
+            if pcm is not None:
+                self._colorbar = self.figure.colorbar(pcm, cax=self._cbar_ax)
+                # Use custom z_label if set, otherwise use transform label
+                z_label = self.settings.z_label_text if self.settings.z_label_text else ylabel
+                self._cbar_ax.set_ylabel(z_label, fontsize=self.settings.label_size)
             
-            if self._show_linecuts:
+            if self._show_linecuts and not self._is_stitched:
                 # Draw cut lines on 2D plot
                 if len(self.ys) > y_idx:
                     self.ax_2d.axhline(self.ys[y_idx], color='r', lw=1, alpha=0.7)
                 if len(self.xs) > x_idx:
                     self.ax_2d.axvline(self.xs[x_idx], color='b', lw=1, alpha=0.7)
             
-            self.ax_2d.set_xlabel(x_label)
-            self.ax_2d.set_ylabel(y_label)
+            self.ax_2d.set_xlabel(x_label, fontsize=self.settings.label_size)
+            self.ax_2d.set_ylabel(y_label, fontsize=self.settings.label_size)
+            
+            # Apply title if set
+            if self.settings.title_text:
+                self.ax_2d.set_title(self.settings.title_text, fontsize=self.settings.title_size)
+            
+            # Apply tick settings
+            self.ax_2d.tick_params(axis='both', which='major',
+                                   length=self.settings.tick_size,
+                                   width=self.settings.tick_width,
+                                   labelsize=self.settings.tick_font_size)
+            
+            # Apply tick count if specified
+            if self.settings.x_tick_count > 0:
+                from matplotlib.ticker import MaxNLocator
+                self.ax_2d.xaxis.set_major_locator(MaxNLocator(nbins=self.settings.x_tick_count))
+            if self.settings.y_tick_count > 0:
+                from matplotlib.ticker import MaxNLocator
+                self.ax_2d.yaxis.set_major_locator(MaxNLocator(nbins=self.settings.y_tick_count))
 
-            # Linecuts (only if enabled)
-            if self._show_linecuts:
+            # Linecuts (only if enabled and not stitched)
+            if self._show_linecuts and not self._is_stitched:
+                # Build marker kwargs for linecuts
+                marker_kwargs = {}
+                if self.settings.marker_style != 'None':
+                    marker_kwargs['marker'] = self.settings.marker_style
+                    marker_kwargs['markersize'] = self.settings.marker_size
+                    marker_kwargs['markerfacecolor'] = self.settings.marker_color
+                    marker_kwargs['markeredgecolor'] = self.settings.marker_color
+
                 # X cut - shows horizontal slice at fixed Y value
                 if zs.ndim > 1 and zs.shape[0] > y_idx:
                     self.ax_xcut.plot(self.xs, zs[y_idx], color=self.settings.line_color,
-                                      linewidth=self.settings.line_width)
+                                      linewidth=self.settings.line_width, **marker_kwargs)
                     self.ax_xcut.set_title(f'{y_label} = {self.ys[y_idx]:.3g}', fontsize=10)
-                self.ax_xcut.set_xlabel(x_label)
-                self.ax_xcut.set_ylabel(ylabel)
+                self.ax_xcut.set_xlabel(x_label, fontsize=self.settings.label_size)
+                self.ax_xcut.set_ylabel(ylabel, fontsize=self.settings.label_size)
                 # Apply x zoom/flip to x-cut
                 if self._xlim is not None:
                     if self._x_flipped:
@@ -1659,15 +2548,15 @@ class PlotWidget2D(QWidget):
                     else:
                         self.ax_xcut.set_xlim(self._full_xlim[0], self._full_xlim[1])
                 if self.settings.grid_enabled:
-                    self.ax_xcut.grid(True, alpha=self.settings.grid_alpha)
+                    self.ax_xcut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
 
                 # Y cut - shows vertical slice at fixed X value
                 if zs.ndim > 1 and zs.shape[1] > x_idx:
                     self.ax_ycut.plot(self.ys, zs[:, x_idx], color=self.settings.line_color,
-                                      linewidth=self.settings.line_width)
+                                      linewidth=self.settings.line_width, **marker_kwargs)
                     self.ax_ycut.set_title(f'{x_label} = {self.xs[x_idx]:.3g}', fontsize=10)
-                self.ax_ycut.set_xlabel(y_label)
-                self.ax_ycut.set_ylabel(ylabel)
+                self.ax_ycut.set_xlabel(y_label, fontsize=self.settings.label_size)
+                self.ax_ycut.set_ylabel(ylabel, fontsize=self.settings.label_size)
                 # Apply y zoom/flip to y-cut
                 if self._ylim is not None:
                     if self._y_flipped:
@@ -1680,7 +2569,7 @@ class PlotWidget2D(QWidget):
                     else:
                         self.ax_ycut.set_xlim(self._full_ylim[0], self._full_ylim[1])
                 if self.settings.grid_enabled:
-                    self.ax_ycut.grid(True, alpha=self.settings.grid_alpha)
+                    self.ax_ycut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
 
             # Draw callout annotations on 2D plot
             for x_val, y_val, z_val in self._callouts:
@@ -1790,9 +2679,12 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('reset_zoom', self._on_reset_zoom)
         self.sidebar.set_callback('flip_x', self._on_flip_x)
         self.sidebar.set_callback('flip_y', self._on_flip_y)
+        self.sidebar.set_callback('interchange_xy', self._on_interchange_xy)
         self.sidebar.set_callback('callout_toggled', self._on_callout_toggled)
         self.sidebar.set_callback('clear_callouts', self._on_clear_callouts)
         self.sidebar.set_callback('change_figsize', self._on_change_figsize)
+        self.sidebar.set_callback('set_limits', self._on_set_limits)
+        self.sidebar.set_callback('stitch_files', self._on_stitch_files)
         main_layout.addWidget(self.sidebar)
 
     def _toggle_sidebar(self):
@@ -1818,6 +2710,11 @@ class Plotter(QMainWindow):
         """Flip Y-axis direction."""
         if self.plot_widget and hasattr(self.plot_widget, 'flip_y'):
             self.plot_widget.flip_y()
+
+    def _on_interchange_xy(self):
+        """Interchange X and Y axes."""
+        if self.plot_widget and hasattr(self.plot_widget, 'interchange_xy'):
+            self.plot_widget.interchange_xy()
 
     def _on_callout_toggled(self, enabled: bool):
         """Toggle callout mode for plots."""
@@ -1872,6 +2769,188 @@ class Plotter(QMainWindow):
             self.plot_widget.figure.tight_layout()
             self.plot_widget.update_plot()
 
+    def _on_set_limits(self):
+        """Open dialog to manually set axis limits."""
+        if not self.plot_widget:
+            return
+        
+        # Get current limits from the axes
+        ax = self.plot_widget.ax if hasattr(self.plot_widget, 'ax') else self.plot_widget.ax_2d
+        current_xlim = ax.get_xlim()
+        current_ylim = ax.get_ylim()
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Axis Limits")
+        layout = QFormLayout(dialog)
+        
+        # X limits section
+        layout.addRow(QLabel("<b>X-Axis Limits</b>"))
+        
+        xmin_spin = QDoubleSpinBox()
+        xmin_spin.setRange(-1e12, 1e12)
+        xmin_spin.setDecimals(6)
+        xmin_spin.setValue(min(current_xlim))
+        xmin_spin.setSingleStep(0.1)
+        layout.addRow("X Min:", xmin_spin)
+        
+        xmax_spin = QDoubleSpinBox()
+        xmax_spin.setRange(-1e12, 1e12)
+        xmax_spin.setDecimals(6)
+        xmax_spin.setValue(max(current_xlim))
+        xmax_spin.setSingleStep(0.1)
+        layout.addRow("X Max:", xmax_spin)
+        
+        # Y limits section
+        layout.addRow(QLabel("<b>Y-Axis Limits</b>"))
+        
+        ymin_spin = QDoubleSpinBox()
+        ymin_spin.setRange(-1e12, 1e12)
+        ymin_spin.setDecimals(6)
+        ymin_spin.setValue(min(current_ylim))
+        ymin_spin.setSingleStep(0.1)
+        layout.addRow("Y Min:", ymin_spin)
+        
+        ymax_spin = QDoubleSpinBox()
+        ymax_spin.setRange(-1e12, 1e12)
+        ymax_spin.setDecimals(6)
+        ymax_spin.setValue(max(current_ylim))
+        ymax_spin.setSingleStep(0.1)
+        layout.addRow("Y Max:", ymax_spin)
+        
+        # Buttons
+        buttons = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+        reset_btn = QPushButton("Reset to Full")
+        buttons.addWidget(ok_btn)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(reset_btn)
+        layout.addRow(buttons)
+        
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        
+        def reset_limits():
+            # Reset to full data range
+            if hasattr(self.plot_widget, 'reset_zoom'):
+                self.plot_widget.reset_zoom()
+            dialog.reject()
+        
+        reset_btn.clicked.connect(reset_limits)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            new_xmin = xmin_spin.value()
+            new_xmax = xmax_spin.value()
+            new_ymin = ymin_spin.value()
+            new_ymax = ymax_spin.value()
+            
+            # Ensure min < max
+            if new_xmin >= new_xmax:
+                new_xmin, new_xmax = new_xmax, new_xmin
+            if new_ymin >= new_ymax:
+                new_ymin, new_ymax = new_ymax, new_ymin
+            
+            # Apply limits to the plot widget
+            # Check if axes are flipped and account for it
+            if self.plot_widget._x_flipped:
+                self.plot_widget._xlim = (new_xmax, new_xmin)
+            else:
+                self.plot_widget._xlim = (new_xmin, new_xmax)
+            
+            if hasattr(self.plot_widget, '_y_flipped') and self.plot_widget._y_flipped:
+                self.plot_widget._ylim = (new_ymax, new_ymin)
+            else:
+                self.plot_widget._ylim = (new_ymin, new_ymax)
+            
+            self.plot_widget.update_plot()
+
+    def _on_stitch_files(self):
+        """Open dialog to stitch multiple HDF5 files together."""
+        dialog = StitchDialog(self)
+        
+        if dialog.exec_() == QDialog.Accepted and dialog.stitch_files:
+            self._perform_stitch(dialog.stitch_files, dialog.detected_spec)
+    
+    def _perform_stitch(self, stitch_files: List[str], spec: ExperimentSpec):
+        """Combine data from multiple files using multiple pcolormesh calls."""
+        try:
+            # Close existing data source if any
+            if self.data_source and hasattr(self.data_source, 'close'):
+                self.data_source.close()
+            
+            # Load all sources and collect datasets
+            datasets = []  # List of (xs, ys, data) tuples
+            all_sources = []
+            
+            for file_path in stitch_files:
+                source = HDF5DataSource(file_path, spec)
+                all_sources.append(source)
+                xs, ys = source.get_axes()
+                data = source.get_data()
+                datasets.append((xs.copy(), ys.copy(), data.copy()))
+            
+            # Get metadata from first file
+            metadata = all_sources[0].metadata.copy()
+            file_paths = [s.file_path for s in all_sources]
+            
+            # Close all the HDF5 sources
+            for source in all_sources:
+                source.close()
+            
+            # Create a stitched data source with multiple datasets
+            new_data_source = StitchedDataSource(
+                datasets, spec, metadata, file_paths
+            )
+            
+            # Now recreate the plot widget
+            if self.update_timer:
+                self.update_timer.stop()
+            if self.plot_widget:
+                self.plot_container.removeWidget(self.plot_widget)
+                self.plot_widget.deleteLater()
+            
+            self.data_source = new_data_source
+            
+            # Get transforms
+            if spec.exp_type in (ExperimentType.CW_1D, ExperimentType.CW_2D):
+                transforms = DataTransforms.get_cw_transforms()
+            elif spec.exp_type in (ExperimentType.RFSOC_1D, ExperimentType.RFSOC_2D):
+                transforms = DataTransforms.get_rfsoc_transforms()
+            else:
+                transforms = DataTransforms.get_generic_transforms()
+            
+            # Always 2D for stitch (we only allow 2D types)
+            self.plot_widget = PlotWidget2D(self.data_source, transforms, self.settings)
+            vmin, vmax = self.plot_widget.get_current_data_range()
+            self.sidebar.update_scale_range(vmin, vmax)
+            
+            self.plot_widget.set_zoom_completed_callback(self._on_zoom_completed)
+            
+            self.drop_label.hide()
+            self.file_info_label.setText(self.data_source.file_info)
+            self.sidebar.set_transforms(transforms)
+            self.sidebar.set_metadata(self.data_source.metadata_str)
+            self.sidebar.set_2d_mode(True)
+            
+            # Disable live updates for stitched data (it's a snapshot, won't update)
+            self.sidebar.live_checkbox.setChecked(False)
+            self.sidebar.live_checkbox.setEnabled(False)
+            self.sidebar.live_checkbox.setToolTip("Live updates not available for stitched data")
+            
+            # Disable linecuts for stitched data
+            self.sidebar.linecuts_checkbox.setChecked(False)
+            self.sidebar.linecuts_checkbox.setEnabled(False)
+            self.sidebar.linecuts_checkbox.setToolTip("Linecuts not available for stitched data")
+            
+            self.plot_container.addWidget(self.plot_widget)
+            self.plot_widget.update_plot()
+            # Don't start live updates for stitched data
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Stitch Error", f"Failed to stitch files:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
     def _on_linecuts_toggled(self, show: bool):
         """Toggle linecut display for 2D plots."""
         if self.plot_widget and hasattr(self.plot_widget, 'set_show_linecuts'):
@@ -1923,6 +3002,11 @@ class Plotter(QMainWindow):
 
     def _show_axis_config(self):
         if not self.data_source:
+            return
+        # Disable for stitched data
+        if hasattr(self.data_source, 'is_stitched') and self.data_source.is_stitched():
+            QMessageBox.information(self, "Configure Axes", 
+                "Axis configuration is not available for stitched data.")
             return
         dialog = AxisSelectionDialog(
             self.data_source.file, self.data_source.metadata,
@@ -2063,6 +3147,14 @@ class Plotter(QMainWindow):
         self.sidebar.set_transforms(transforms)
         self.sidebar.set_metadata(self.data_source.metadata_str)
         self.sidebar.set_2d_mode(is_2d)
+        
+        # Re-enable live updates (may have been disabled by stitched data)
+        self.sidebar.live_checkbox.setEnabled(True)
+        self.sidebar.live_checkbox.setToolTip("")
+        
+        # Re-enable linecuts (may have been disabled by stitched data)
+        self.sidebar.linecuts_checkbox.setEnabled(True)
+        self.sidebar.linecuts_checkbox.setToolTip("")
 
         self.plot_container.addWidget(self.plot_widget)
         self.plot_widget.update_plot()
