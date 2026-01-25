@@ -26,15 +26,15 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QRadioButton,
     QButtonGroup, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox,
     QFrame, QScrollArea, QSplitter, QSlider, QToolButton, QSizePolicy,
-    QColorDialog, QListWidget, QListWidgetItem
+    QColorDialog, QListWidget, QListWidgetItem, QShortcut
 )
-from PyQt5.QtGui import QPixmap, QIcon, QFont
+from PyQt5.QtGui import QPixmap, QIcon, QFont, QKeySequence
 from PyQt5.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.widgets import Slider as MplSlider
 import matplotlib.colors as mcolors
+from matplotlib.colors import Normalize, PowerNorm, TwoSlopeNorm
 
 # Optional: win32com for Word integration (Windows only)
 try:
@@ -64,6 +64,7 @@ class ExperimentSpec:
     y_label: Optional[str] = None
     y_scale: float = 1.0
     data_key: str = 'S21'
+    data_label: Optional[str] = None  # Label for z-axis / colorbar
 
 
 @dataclass
@@ -75,12 +76,20 @@ class PlotSettings:
     marker_style: str = 'None'  # None, o, s, ^, v, D, etc.
     marker_size: float = 4.0
     marker_color: str = '#1f77b4'
+    # Fit curve settings
+    fit_color: str = '#d62728'  # Red
+    fit_line_width: float = 1.5
+    fit_line_style: str = '--'  # dashed
     grid_enabled: bool = True
     grid_alpha: float = 0.3
     grid_width: float = 0.5
     autoscale: bool = True
     vmin: Optional[float] = None
     vmax: Optional[float] = None
+    # Normalization settings
+    norm_type: str = 'linear'  # 'linear', 'twoslope', 'power'
+    norm_vcenter: Optional[float] = None  # For twoslope norm
+    norm_gamma: float = 0.5  # For power norm
     # Tick settings
     tick_size: float = 6.0
     tick_width: float = 1.0
@@ -97,6 +106,11 @@ class PlotSettings:
     title_size: float = 14.0
     # Y-axis padding for 1D plots (fraction of data range)
     y_padding: float = 0.05
+    # Colorbar settings
+    cbar_shrink: float = 1.0
+    # Figure size (inches)
+    fig_width: float = 10.0
+    fig_height: float = 8.0
     
     def get_clim(self, data: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
         """Get color limits, using data range if autoscale or values not set."""
@@ -169,6 +183,198 @@ EXPERIMENT_REGISTRY: Dict[str, ExperimentSpec] = {
 }
 
 
+# =============================================================================
+# Fitting Models and Functions
+# =============================================================================
+
+import re
+from scipy.optimize import curve_fit
+
+
+@dataclass
+class FitResult:
+    """Result of a curve fit."""
+    params: np.ndarray
+    errors: np.ndarray
+    r_squared: float
+    x_range: Tuple[float, float]  # (x_min, x_max) that was fitted
+    model_name: str
+    param_names: List[str]
+    param_units: List[str]
+    extra_results: Optional[Dict[str, Tuple[float, str]]] = None  # e.g., {'separation': (value, unit)}
+
+
+def parse_unit(label: str) -> str:
+    """Extract unit from axis label like 'Frequency (Hz)' → 'Hz'."""
+    match = re.search(r'\(([^)]+)\)', label)
+    return match.group(1) if match else ''
+
+
+# --- Fitting Functions ---
+
+def lorentzian(x, amplitude, center, width, offset):
+    """
+    Lorentzian peak function.
+    f(x) = amplitude * (width/2)² / ((x - center)² + (width/2)²) + offset
+    """
+    return amplitude * (width/2)**2 / ((x - center)**2 + (width/2)**2) + offset
+
+
+def double_lorentzian(x, amp1, center1, width1, amp2, center2, width2, offset):
+    """
+    Sum of two Lorentzian peaks.
+    f(x) = L1(x) + L2(x) + offset
+    """
+    L1 = amp1 * (width1/2)**2 / ((x - center1)**2 + (width1/2)**2)
+    L2 = amp2 * (width2/2)**2 / ((x - center2)**2 + (width2/2)**2)
+    return L1 + L2 + offset
+
+
+def exponential_decay(x, amplitude, tau, offset):
+    """
+    Exponential decay function.
+    f(x) = amplitude * exp(-x / tau) + offset
+    """
+    return amplitude * np.exp(-x / tau) + offset
+
+
+def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):
+    """
+    Exponentially decaying sinusoid.
+    f(x) = amplitude * exp(-x / tau) * sin(2π * frequency * x + phase) + offset
+    """
+    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset
+
+
+def linear(x, slope, intercept):
+    """
+    Linear function.
+    f(x) = slope * x + intercept
+    """
+    return slope * x + intercept
+
+
+# --- Fit Model Definitions ---
+
+FIT_MODELS = {
+    'Lorentzian': {
+        'func': lorentzian,
+        'param_names': ['amplitude', 'center', 'width', 'offset'],
+        'param_units': ['y', 'x', 'x', 'y'],  # y = y-axis unit, x = x-axis unit
+    },
+    'Double Lorentzian': {
+        'func': double_lorentzian,
+        'param_names': ['amp1', 'center1', 'width1', 'amp2', 'center2', 'width2', 'offset'],
+        'param_units': ['y', 'x', 'x', 'y', 'x', 'x', 'y'],
+        'extra_results': ['separation'],  # |center2 - center1|
+    },
+    'Exponential Decay': {
+        'func': exponential_decay,
+        'param_names': ['amplitude', 'tau', 'offset'],
+        'param_units': ['y', 'x', 'y'],
+    },
+    'Sin Exp Decay': {
+        'func': sin_exp_decay,
+        'param_names': ['amplitude', 'tau', 'frequency', 'phase', 'offset'],
+        'param_units': ['y', 'x', '1/x', 'none', 'y'],
+    },
+    'Linear': {
+        'func': linear,
+        'param_names': ['slope', 'intercept'],
+        'param_units': ['y/x', 'y'],
+    },
+}
+
+
+class Fitter:
+    """Curve fitting engine."""
+    
+    @staticmethod
+    def fit(x: np.ndarray, y: np.ndarray, model_name: str, 
+            initial_guesses: Dict[str, Optional[float]],
+            x_unit: str = '', y_unit: str = '') -> FitResult:
+        """
+        Perform curve fit.
+        
+        Args:
+            x, y: Data arrays
+            model_name: Key in FIT_MODELS
+            initial_guesses: Dict of param_name -> value (None for unset)
+            x_unit, y_unit: Units for display
+            
+        Returns:
+            FitResult object
+            
+        Raises:
+            ValueError: If fit fails
+        """
+        model = FIT_MODELS[model_name]
+        func = model['func']
+        param_names = model['param_names']
+        
+        # Build p0 from initial_guesses
+        p0 = []
+        for name in param_names:
+            val = initial_guesses.get(name)
+            if val is None:
+                raise ValueError(f"Initial guess required for '{name}'")
+            p0.append(val)
+        
+        # Perform fit
+        try:
+            popt, pcov = curve_fit(func, x, y, p0=p0, maxfev=10000)
+            perr = np.sqrt(np.diag(pcov))
+        except Exception as e:
+            raise ValueError(f"Fit failed: {str(e)}")
+        
+        # Calculate R²
+        y_fit = func(x, *popt)
+        ss_res = np.sum((y - y_fit)**2)
+        ss_tot = np.sum((y - np.mean(y))**2)
+        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        
+        # Resolve units
+        def resolve_unit(unit_type: str) -> str:
+            if unit_type == 'x':
+                return x_unit
+            elif unit_type == 'y':
+                return y_unit
+            elif unit_type == '1/x':
+                return f"1/{x_unit}" if x_unit else ''
+            elif unit_type == 'y/x':
+                if y_unit and x_unit:
+                    return f"{y_unit}/{x_unit}"
+                return ''
+            else:  # 'none' or unknown
+                return ''
+        
+        param_units_resolved = [resolve_unit(u) for u in model['param_units']]
+        
+        # Calculate extra results
+        extra_results = None
+        if 'extra_results' in model:
+            extra_results = {}
+            if 'separation' in model['extra_results']:
+                # For double Lorentzian: |center2 - center1|
+                center1_idx = param_names.index('center1')
+                center2_idx = param_names.index('center2')
+                separation = abs(popt[center2_idx] - popt[center1_idx])
+                # Error propagation: sqrt(err1² + err2²)
+                sep_error = np.sqrt(perr[center1_idx]**2 + perr[center2_idx]**2)
+                extra_results['separation'] = (separation, sep_error, x_unit)
+        
+        return FitResult(
+            params=popt,
+            errors=perr,
+            r_squared=r_squared,
+            x_range=(float(x.min()), float(x.max())),
+            model_name=model_name,
+            param_names=param_names,
+            param_units=param_units_resolved,
+            extra_results=extra_results
+        )
+
+
 class DataTransforms:
     """Data transformation functions for different plot types."""
 
@@ -200,6 +406,24 @@ class DataTransforms:
             ('Imaginary', 'Imaginary', lambda d: np.imag(d)),
             ('Raw', 'Raw', lambda d: d),
         ]
+
+
+def rotate_s21(data: np.ndarray) -> np.ndarray:
+    """
+    Rotate S21 complex data to minimize imaginary variance.
+    
+    Finds the optimal rotation angle that minimizes the variance of the
+    imaginary component, then ensures the mean phase is within ±90°.
+    Handles NaN values by ignoring them in variance/mean calculations.
+    """
+    angles = np.linspace(0, 2 * np.pi, 1000)
+    variances = [np.nanvar(np.imag(data * np.exp(-1j * angle))) for angle in angles]
+    optimal_angle = angles[np.argmin(variances)]
+    rotated_data = data * np.exp(-1j * optimal_angle)
+    new_angle = np.angle(np.nanmean(rotated_data), deg=True)
+    if new_angle > 90 or new_angle < -90:
+        rotated_data = rotated_data * np.exp(1j * np.pi)
+    return rotated_data
 
 
 class CollapsibleSection(QWidget):
@@ -264,6 +488,7 @@ class Sidebar(QWidget):
         super().__init__(parent)
         self.settings = PlotSettings()
         self.callbacks = {}
+        self._is_2d_mode = False  # Track if in 2D mode for fitting
 
         self.setFixedWidth(280)
         self.setStyleSheet("""
@@ -339,6 +564,20 @@ class Sidebar(QWidget):
         transform_layout.addWidget(self.transform_combo)
         data_section.add_layout(transform_layout)
 
+        # Linecuts toggle (for 2D only)
+        self.linecuts_checkbox = QCheckBox("Show Linecuts")
+        self.linecuts_checkbox.setChecked(False)
+        self.linecuts_checkbox.toggled.connect(
+            lambda c: self._emit('linecuts_toggled', c))
+        data_section.add_widget(self.linecuts_checkbox)
+
+        # Rotate S21 checkbox
+        self.rotate_s21_checkbox = QCheckBox("Rotate S21")
+        self.rotate_s21_checkbox.setToolTip("Rotate complex S21 data to minimize imaginary variance")
+        self.rotate_s21_checkbox.toggled.connect(
+            lambda c: self._emit('rotate_s21_toggled', c))
+        data_section.add_widget(self.rotate_s21_checkbox)
+
         # Live update
         self.live_checkbox = QCheckBox("Live Update")
         self.live_checkbox.setChecked(False)
@@ -364,27 +603,83 @@ class Sidebar(QWidget):
         self.stitch_btn.clicked.connect(lambda: self._emit('stitch_files'))
         data_section.add_widget(self.stitch_btn)
 
-        # Linecuts toggle (for 2D only) - moved from Appearance
-        self.linecuts_checkbox = QCheckBox("Show Linecuts")
-        self.linecuts_checkbox.setChecked(False)
-        self.linecuts_checkbox.toggled.connect(
-            lambda c: self._emit('linecuts_toggled', c))
-        data_section.add_widget(self.linecuts_checkbox)
-
-        # Callout mode toggle - moved from Appearance
-        self.callout_checkbox = QCheckBox("Callout Mode")
-        self.callout_checkbox.setChecked(False)
-        self.callout_checkbox.setToolTip("Click on plot to add annotation markers")
-        self.callout_checkbox.toggled.connect(
-            lambda c: self._emit('callout_toggled', c))
-        data_section.add_widget(self.callout_checkbox)
-
-        # Clear callouts button - moved from Appearance
-        self.clear_callouts_btn = QPushButton("Clear Callouts")
-        self.clear_callouts_btn.clicked.connect(lambda: self._emit('clear_callouts'))
-        data_section.add_widget(self.clear_callouts_btn)
-
         self.scroll_layout.addWidget(data_section)
+
+        # === Fitting Section (for 1D and 2D linecuts) ===
+        self.fitting_section = CollapsibleSection("Fitting", start_collapsed=True)
+        
+        # Function selector
+        fit_func_layout = QVBoxLayout()
+        fit_func_layout.addWidget(QLabel("Function:"))
+        self.fit_func_combo = QComboBox()
+        self.fit_func_combo.addItems(list(FIT_MODELS.keys()))
+        self.fit_func_combo.currentTextChanged.connect(self._on_fit_func_changed)
+        fit_func_layout.addWidget(self.fit_func_combo)
+        self.fitting_section.add_layout(fit_func_layout)
+        
+        # Initial guesses container (will be populated dynamically)
+        self.fit_guesses_container = QWidget()
+        self.fit_guesses_layout = QFormLayout(self.fit_guesses_container)
+        self.fit_guesses_layout.setContentsMargins(0, 0, 0, 0)
+        self.fit_guesses_layout.setSpacing(4)
+        self.fit_guess_edits = {}  # param_name -> QLineEdit
+        self.fitting_section.add_widget(self.fit_guesses_container)
+        
+        # Fit buttons
+        fit_buttons_layout = QHBoxLayout()
+        self.fit_visible_btn = QPushButton("Fit Visible")
+        self.fit_visible_btn.setToolTip("Fit data within current view")
+        self.fit_visible_btn.clicked.connect(lambda: self._emit('fit_visible'))
+        fit_buttons_layout.addWidget(self.fit_visible_btn)
+        
+        self.fit_all_btn = QPushButton("Fit All")
+        self.fit_all_btn.setToolTip("Fit entire dataset")
+        self.fit_all_btn.clicked.connect(lambda: self._emit('fit_all'))
+        fit_buttons_layout.addWidget(self.fit_all_btn)
+        
+        self.fit_clear_btn = QPushButton("Clear")
+        self.fit_clear_btn.setToolTip("Clear fit results")
+        self.fit_clear_btn.clicked.connect(lambda: self._emit('fit_clear'))
+        fit_buttons_layout.addWidget(self.fit_clear_btn)
+        self.fitting_section.add_layout(fit_buttons_layout)
+        
+        # Show fit curve checkbox
+        self.show_fit_checkbox = QCheckBox("Show fit curve")
+        self.show_fit_checkbox.setChecked(True)
+        self.show_fit_checkbox.toggled.connect(lambda c: self._emit('show_fit_toggled', c))
+        self.fitting_section.add_widget(self.show_fit_checkbox)
+        
+        # Show residuals checkbox
+        self.show_residuals_checkbox = QCheckBox("Show residuals")
+        self.show_residuals_checkbox.setChecked(False)
+        self.show_residuals_checkbox.toggled.connect(lambda c: self._emit('show_residuals_toggled', c))
+        self.fitting_section.add_widget(self.show_residuals_checkbox)
+        
+        # Results display
+        self.fit_results_label = QLabel("")
+        self.fit_results_label.setWordWrap(True)
+        self.fit_results_label.setStyleSheet("font-family: monospace; font-size: 11px; background: #f5f5f5; padding: 8px; border-radius: 4px;")
+        self.fit_results_label.hide()
+        self.fitting_section.add_widget(self.fit_results_label)
+        
+        # Error display (red text)
+        self.fit_error_label = QLabel("")
+        self.fit_error_label.setWordWrap(True)
+        self.fit_error_label.setStyleSheet("color: #dc2626; font-size: 11px;")
+        self.fit_error_label.hide()
+        self.fitting_section.add_widget(self.fit_error_label)
+        
+        # Copy results button
+        self.copy_fit_btn = QPushButton("Copy Results")
+        self.copy_fit_btn.setToolTip("Copy fit results to clipboard")
+        self.copy_fit_btn.clicked.connect(lambda: self._emit('copy_fit_results'))
+        self.copy_fit_btn.hide()
+        self.fitting_section.add_widget(self.copy_fit_btn)
+        
+        self.scroll_layout.addWidget(self.fitting_section)
+        
+        # Populate initial guesses for default function
+        self._update_fit_guess_fields()
 
         # === Color Scale Section (for 2D) ===
         self.scale_section = CollapsibleSection("Color Scale", start_collapsed=True)
@@ -398,11 +693,47 @@ class Sidebar(QWidget):
                      'cividis', 'cividis_r', 'coolwarm', 'coolwarm_r',
                      'RdBu', 'RdBu_r', 'seismic', 'seismic_r', 
                      'hot', 'hot_r', 'jet', 'jet_r',
-                     'gray', 'gray_r', 'bone', 'bone_r']
+                     'gray', 'gray_r', 'bone', 'bone_r', 'Blues', 'Blues_r']
         self.cmap_combo.addItems(colormaps)
         self.cmap_combo.currentTextChanged.connect(self._on_colormap_changed)
         cmap_layout.addWidget(self.cmap_combo)
         self.scale_section.add_layout(cmap_layout)
+
+        # Normalization dropdown
+        norm_layout = QVBoxLayout()
+        norm_layout.addWidget(QLabel("Normalization:"))
+        self.norm_combo = QComboBox()
+        self.norm_combo.addItems(['Linear', 'Two Slope', 'Power'])
+        self.norm_combo.currentTextChanged.connect(self._on_norm_changed)
+        norm_layout.addWidget(self.norm_combo)
+        self.scale_section.add_layout(norm_layout)
+
+        # Two Slope controls (vcenter)
+        self.twoslope_controls = QWidget()
+        twoslope_layout = QFormLayout(self.twoslope_controls)
+        twoslope_layout.setContentsMargins(0, 0, 0, 0)
+        self.vcenter_edit = QLineEdit()
+        self.vcenter_edit.setPlaceholderText("auto (median)")
+        self.vcenter_edit.setToolTip("Center value for two-slope normalization. Leave empty for auto (median).")
+        self.vcenter_edit.editingFinished.connect(self._on_vcenter_changed)
+        twoslope_layout.addRow("Center:", self.vcenter_edit)
+        self.twoslope_controls.hide()
+        self.scale_section.add_widget(self.twoslope_controls)
+
+        # Power norm controls (gamma)
+        self.power_controls = QWidget()
+        power_layout = QFormLayout(self.power_controls)
+        power_layout.setContentsMargins(0, 0, 0, 0)
+        self.gamma_spin = QDoubleSpinBox()
+        self.gamma_spin.setRange(0.1, 3.0)
+        self.gamma_spin.setDecimals(2)
+        self.gamma_spin.setValue(0.5)
+        self.gamma_spin.setSingleStep(0.1)
+        self.gamma_spin.setToolTip("Gamma < 1 enhances weak features, > 1 emphasizes peaks")
+        self.gamma_spin.valueChanged.connect(self._on_gamma_changed)
+        power_layout.addRow("Gamma:", self.gamma_spin)
+        self.power_controls.hide()
+        self.scale_section.add_widget(self.power_controls)
 
         self.autoscale_checkbox = QCheckBox("Auto Scale")
         self.autoscale_checkbox.setChecked(True)
@@ -452,12 +783,17 @@ class Sidebar(QWidget):
             lambda: self._emit('configure_axes'))
         axes_section.add_widget(self.config_axes_btn)
 
+        # Set Limits button
+        self.set_limits_btn = QPushButton("Set Limits...")
+        self.set_limits_btn.setToolTip("Manually set X and Y axis limits")
+        self.set_limits_btn.clicked.connect(lambda: self._emit('set_limits'))
+        axes_section.add_widget(self.set_limits_btn)
+
         # Zoom controls
         zoom_layout = QHBoxLayout()
         self.zoom_btn = QPushButton("🔍 Zoom")
-        self.zoom_btn.setCheckable(True)
-        self.zoom_btn.setToolTip("Click and drag on plot to zoom")
-        self.zoom_btn.toggled.connect(lambda c: self._emit('zoom_toggled', c))
+        self.zoom_btn.setToolTip("Click and drag on plot to zoom. Press Escape to cancel.")
+        self.zoom_btn.clicked.connect(lambda: self._emit('start_zoom'))
         zoom_layout.addWidget(self.zoom_btn)
         
         self.reset_zoom_btn = QPushButton("↩ Reset")
@@ -596,6 +932,20 @@ class Sidebar(QWidget):
         z_label_layout.addWidget(self.z_label_edit)
         appearance_section.add_widget(self.z_label_widget)
 
+        # Colorbar shrink (for 2D plots)
+        self.cbar_shrink_widget = QWidget()
+        cbar_shrink_layout = QHBoxLayout(self.cbar_shrink_widget)
+        cbar_shrink_layout.setContentsMargins(0, 0, 0, 0)
+        cbar_shrink_layout.addWidget(QLabel("Colorbar Shrink:"))
+        self.cbar_shrink_spin = QDoubleSpinBox()
+        self.cbar_shrink_spin.setRange(0.1, 1.0)
+        self.cbar_shrink_spin.setValue(1.0)
+        self.cbar_shrink_spin.setSingleStep(0.05)
+        self.cbar_shrink_spin.setToolTip("Shrink factor for colorbar (1.0 = full size)")
+        self.cbar_shrink_spin.valueChanged.connect(self._on_cbar_shrink_changed)
+        cbar_shrink_layout.addWidget(self.cbar_shrink_spin)
+        appearance_section.add_widget(self.cbar_shrink_widget)
+
         # Label size
         label_size_layout = QHBoxLayout()
         label_size_layout.addWidget(QLabel("Label Size:"))
@@ -656,6 +1006,19 @@ class Sidebar(QWidget):
         marker_color_layout.addWidget(self.marker_color_button)
         colors_layout.addLayout(marker_color_layout)
         
+        # Fit color (initially hidden)
+        self.fit_color_layout = QVBoxLayout()
+        self.fit_color_label = QLabel("Fit Color:")
+        self.fit_color_layout.addWidget(self.fit_color_label)
+        self.fit_color_button = QPushButton()
+        self.fit_color_button.setFixedSize(50, 24)
+        self.fit_color_button.setStyleSheet(f"background-color: {self.settings.fit_color};")
+        self.fit_color_button.clicked.connect(self._pick_fit_color)
+        self.fit_color_layout.addWidget(self.fit_color_button)
+        colors_layout.addLayout(self.fit_color_layout)
+        self.fit_color_label.hide()
+        self.fit_color_button.hide()
+        
         colors_layout.addStretch()
         appearance_section.add_layout(colors_layout)
 
@@ -704,6 +1067,43 @@ class Sidebar(QWidget):
         ms_layout.addWidget(self.markersize_spin)
         appearance_section.add_layout(ms_layout)
 
+        # Fit line style controls (initially hidden, shown when fit is successful)
+        self.fit_style_container = QWidget()
+        fit_style_layout = QVBoxLayout(self.fit_style_container)
+        fit_style_layout.setContentsMargins(0, 0, 0, 0)
+        fit_style_layout.setSpacing(4)
+        
+        # Fit line width
+        fit_lw_layout = QHBoxLayout()
+        fit_lw_layout.addWidget(QLabel("Fit Line Width:"))
+        self.fit_linewidth_spin = QDoubleSpinBox()
+        self.fit_linewidth_spin.setRange(0.5, 5.0)
+        self.fit_linewidth_spin.setValue(1.5)
+        self.fit_linewidth_spin.setSingleStep(0.5)
+        self.fit_linewidth_spin.valueChanged.connect(self._on_fit_linewidth_changed)
+        fit_lw_layout.addWidget(self.fit_linewidth_spin)
+        fit_style_layout.addLayout(fit_lw_layout)
+        
+        # Fit line style
+        fit_ls_layout = QHBoxLayout()
+        fit_ls_layout.addWidget(QLabel("Fit Line Style:"))
+        self.fit_linestyle_combo = QComboBox()
+        self.fit_line_styles = [
+            ('Solid', '-'),
+            ('Dashed', '--'),
+            ('Dotted', ':'),
+            ('Dash-Dot', '-.'),
+        ]
+        for name, _ in self.fit_line_styles:
+            self.fit_linestyle_combo.addItem(name)
+        self.fit_linestyle_combo.setCurrentIndex(1)  # Default to Dashed
+        self.fit_linestyle_combo.currentIndexChanged.connect(self._on_fit_linestyle_changed)
+        fit_ls_layout.addWidget(self.fit_linestyle_combo)
+        fit_style_layout.addLayout(fit_ls_layout)
+        
+        self.fit_style_container.hide()
+        appearance_section.add_widget(self.fit_style_container)
+
         # Separator
         appearance_section.add_widget(QLabel(""))  # spacer
 
@@ -713,13 +1113,62 @@ class Sidebar(QWidget):
         self.figsize_btn.clicked.connect(lambda: self._emit('change_figsize'))
         appearance_section.add_widget(self.figsize_btn)
 
-        # Set axis limits button
-        self.set_limits_btn = QPushButton("Set Limits...")
-        self.set_limits_btn.setToolTip("Manually set X and Y axis limits")
-        self.set_limits_btn.clicked.connect(lambda: self._emit('set_limits'))
-        appearance_section.add_widget(self.set_limits_btn)
+        # Import/Export style buttons
+        style_buttons_layout = QHBoxLayout()
+        self.import_style_btn = QPushButton("📥 Import Style")
+        self.import_style_btn.setToolTip("Load appearance settings from JSON file (Ctrl+T)")
+        self.import_style_btn.clicked.connect(lambda: self._emit('import_style'))
+        style_buttons_layout.addWidget(self.import_style_btn)
+        
+        self.export_style_btn = QPushButton("📤 Export Style")
+        self.export_style_btn.setToolTip("Save appearance settings to JSON file (Ctrl+Shift+E)")
+        self.export_style_btn.clicked.connect(lambda: self._emit('export_style'))
+        style_buttons_layout.addWidget(self.export_style_btn)
+        appearance_section.add_layout(style_buttons_layout)
 
         self.scroll_layout.addWidget(appearance_section)
+
+        # === Annotate Section ===
+        annotate_section = CollapsibleSection("Annotate", start_collapsed=True)
+
+        # Add Callout and Add Delta Callout buttons side by side
+        callout_buttons_layout = QHBoxLayout()
+        self.add_callout_btn = QPushButton("Add Callout")
+        self.add_callout_btn.setToolTip("Click on plot to add one annotation marker. Ctrl+click to delete. Escape to cancel.")
+        self.add_callout_btn.clicked.connect(lambda: self._emit('add_callout'))
+        callout_buttons_layout.addWidget(self.add_callout_btn)
+        
+        self.add_delta_callout_btn = QPushButton("Add Δ Callout")
+        self.add_delta_callout_btn.setToolTip("Click two points to show difference. Escape to cancel.")
+        self.add_delta_callout_btn.clicked.connect(lambda: self._emit('add_delta_callout'))
+        callout_buttons_layout.addWidget(self.add_delta_callout_btn)
+        annotate_section.add_layout(callout_buttons_layout)
+        
+        # Clear all callouts button
+        self.clear_callouts_btn = QPushButton("Clear All Callouts")
+        self.clear_callouts_btn.setToolTip("Clear all callout markers (point and delta)")
+        self.clear_callouts_btn.clicked.connect(lambda: self._emit('clear_callouts'))
+        annotate_section.add_widget(self.clear_callouts_btn)
+
+        # Add V-Line and H-Line buttons side by side
+        line_buttons_layout = QHBoxLayout()
+        self.add_vline_btn = QPushButton("Add V-Line")
+        self.add_vline_btn.setToolTip("Add a vertical line at a specified x value")
+        self.add_vline_btn.clicked.connect(lambda: self._emit('add_vline'))
+        line_buttons_layout.addWidget(self.add_vline_btn)
+        
+        self.add_hline_btn = QPushButton("Add H-Line")
+        self.add_hline_btn.setToolTip("Add a horizontal line at a specified y value")
+        self.add_hline_btn.clicked.connect(lambda: self._emit('add_hline'))
+        line_buttons_layout.addWidget(self.add_hline_btn)
+        annotate_section.add_layout(line_buttons_layout)
+
+        # Clear lines button
+        self.clear_lines_btn = QPushButton("Clear Lines")
+        self.clear_lines_btn.clicked.connect(lambda: self._emit('clear_lines'))
+        annotate_section.add_widget(self.clear_lines_btn)
+
+        self.scroll_layout.addWidget(annotate_section)
 
         # === Export Section ===
         export_section = CollapsibleSection("Export", start_collapsed=True)
@@ -802,6 +1251,22 @@ class Sidebar(QWidget):
             self.marker_color_button.setStyleSheet(f"background-color: {color.name()};")
             self._emit('settings_changed', self.settings)
 
+    def _pick_fit_color(self):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            self.settings.fit_color = color.name()
+            self.fit_color_button.setStyleSheet(f"background-color: {color.name()};")
+            self._emit('settings_changed', self.settings)
+    
+    def _on_fit_linewidth_changed(self, width: float):
+        self.settings.fit_line_width = width
+        self._emit('settings_changed', self.settings)
+    
+    def _on_fit_linestyle_changed(self, index: int):
+        _, style_code = self.fit_line_styles[index]
+        self.settings.fit_line_style = style_code
+        self._emit('settings_changed', self.settings)
+
     def _on_grid_toggled(self, enabled: bool):
         self.settings.grid_enabled = enabled
         self._emit('settings_changed', self.settings)
@@ -819,6 +1284,34 @@ class Sidebar(QWidget):
     def _on_step_changed(self, step: float):
         self.vmin_spin.setSingleStep(step)
         self.vmax_spin.setSingleStep(step)
+
+    def _on_norm_changed(self, norm_text: str):
+        """Handle normalization type change."""
+        norm_map = {'Linear': 'linear', 'Two Slope': 'twoslope', 'Power': 'power'}
+        self.settings.norm_type = norm_map.get(norm_text, 'linear')
+        
+        # Show/hide relevant controls
+        self.twoslope_controls.setVisible(norm_text == 'Two Slope')
+        self.power_controls.setVisible(norm_text == 'Power')
+        
+        self._emit('settings_changed', self.settings)
+
+    def _on_vcenter_changed(self):
+        """Handle vcenter value change for two-slope norm."""
+        text = self.vcenter_edit.text().strip()
+        if text == '':
+            self.settings.norm_vcenter = None  # Auto (median)
+        else:
+            try:
+                self.settings.norm_vcenter = float(text)
+            except ValueError:
+                self.settings.norm_vcenter = None
+        self._emit('settings_changed', self.settings)
+
+    def _on_gamma_changed(self, gamma: float):
+        """Handle gamma value change for power norm."""
+        self.settings.norm_gamma = gamma
+        self._emit('settings_changed', self.settings)
 
     # Tick settings callbacks
     def _on_tick_size_changed(self, size: float):
@@ -857,6 +1350,10 @@ class Sidebar(QWidget):
         self.settings.z_label_text = text
         self._emit('settings_changed', self.settings)
 
+    def _on_cbar_shrink_changed(self, value: float):
+        self.settings.cbar_shrink = value
+        self._emit('settings_changed', self.settings)
+
     def _on_label_size_changed(self, size: float):
         self.settings.label_size = size
         self._emit('settings_changed', self.settings)
@@ -868,6 +1365,117 @@ class Sidebar(QWidget):
     def _on_title_size_changed(self, size: float):
         self.settings.title_size = size
         self._emit('settings_changed', self.settings)
+
+    def _on_fit_func_changed(self, func_name: str):
+        """Handle fit function selection change."""
+        self._update_fit_guess_fields()
+        self._emit('fit_func_changed', func_name)
+    
+    def _update_fit_guess_fields(self):
+        """Update initial guess fields based on selected function."""
+        # Clear existing fields
+        while self.fit_guesses_layout.count():
+            item = self.fit_guesses_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.fit_guess_edits.clear()
+        
+        # Get selected function
+        func_name = self.fit_func_combo.currentText()
+        if func_name not in FIT_MODELS:
+            return
+        
+        model = FIT_MODELS[func_name]
+        param_names = model['param_names']
+        
+        # Add label
+        header = QLabel("Initial Guesses:")
+        header.setStyleSheet("font-weight: bold; font-size: 11px;")
+        self.fit_guesses_layout.addRow(header)
+        
+        # Create QLineEdit for each parameter
+        for param in param_names:
+            edit = QLineEdit()
+            edit.setPlaceholderText("required")
+            edit.setToolTip(f"Initial guess for {param}")
+            self.fit_guess_edits[param] = edit
+            self.fit_guesses_layout.addRow(f"{param}:", edit)
+    
+    def get_fit_guesses(self) -> Dict[str, Optional[float]]:
+        """Get current initial guesses from the UI."""
+        guesses = {}
+        for param, edit in self.fit_guess_edits.items():
+            text = edit.text().strip()
+            if text:
+                try:
+                    guesses[param] = float(text)
+                except ValueError:
+                    guesses[param] = None
+            else:
+                guesses[param] = None
+        return guesses
+    
+    def show_fit_results(self, result: 'FitResult'):
+        """Display fit results in the sidebar."""
+        self.fit_error_label.hide()
+        
+        lines = []
+        for i, (name, value, error, unit) in enumerate(zip(
+                result.param_names, result.params, result.errors, result.param_units)):
+            unit_str = f" {unit}" if unit else ""
+            lines.append(f"{name}: {value:.4g} ± {error:.2g}{unit_str}")
+        
+        # Add extra results (e.g., separation for double Lorentzian)
+        if result.extra_results:
+            lines.append("")  # blank line
+            for name, (value, error, unit) in result.extra_results.items():
+                unit_str = f" {unit}" if unit else ""
+                lines.append(f"{name}: {value:.4g} ± {error:.2g}{unit_str}")
+        
+        lines.append("")
+        lines.append(f"R²: {result.r_squared:.6f}")
+        
+        self.fit_results_label.setText("\n".join(lines))
+        self.fit_results_label.show()
+        self.copy_fit_btn.show()
+        
+        # Show fit style controls
+        self.fit_color_label.show()
+        self.fit_color_button.show()
+        self.fit_style_container.show()
+    
+    def show_fit_error(self, message: str):
+        """Display fit error message."""
+        self.fit_results_label.hide()
+        self.copy_fit_btn.hide()
+        self.fit_error_label.setText(f"⚠ {message}")
+        self.fit_error_label.show()
+    
+    def clear_fit_display(self):
+        """Clear fit results and error displays."""
+        self.fit_results_label.hide()
+        self.fit_error_label.hide()
+        self.copy_fit_btn.hide()
+        
+        # Hide fit style controls
+        self.fit_color_label.hide()
+        self.fit_color_button.hide()
+        self.fit_style_container.hide()
+    
+    def set_fit_enabled(self, enabled: bool):
+        """Enable or disable fitting controls."""
+        self.fit_func_combo.setEnabled(enabled)
+        self.fit_guesses_container.setEnabled(enabled)
+        self.fit_visible_btn.setEnabled(enabled)
+        self.fit_all_btn.setEnabled(enabled)
+        self.show_fit_checkbox.setEnabled(enabled)
+        self.show_residuals_checkbox.setEnabled(enabled)
+        if not enabled:
+            self.fit_visible_btn.setToolTip("Fitting disabled during live update")
+            self.fit_all_btn.setToolTip("Fitting disabled during live update")
+        else:
+            self.fit_visible_btn.setToolTip("Fit data within current view")
+            self.fit_all_btn.setToolTip("Fit entire dataset")
 
     def set_transforms(self, transforms: List[Tuple[str, str, Callable]]):
         """Update available transforms."""
@@ -881,10 +1489,24 @@ class Sidebar(QWidget):
 
     def set_2d_mode(self, is_2d: bool):
         """Show/hide 2D-specific controls."""
+        self._is_2d_mode = is_2d
         self.scale_section.setVisible(is_2d)
         self.linecuts_checkbox.setVisible(is_2d)
         self.z_label_widget.setVisible(is_2d)
+        self.cbar_shrink_widget.setVisible(is_2d)
         # Flip Y and Interchange are now available for both 1D and 2D plots
+        
+        # Fitting: always available for 1D, requires linecuts for 2D
+        if is_2d:
+            # For 2D, fitting depends on linecuts state
+            linecuts_on = self.linecuts_checkbox.isChecked()
+            self.set_fit_enabled(linecuts_on)
+            if not linecuts_on:
+                self.fit_visible_btn.setToolTip("Enable linecuts to use fitting")
+                self.fit_all_btn.setToolTip("Enable linecuts to use fitting")
+        else:
+            # For 1D, fitting is always available
+            self.set_fit_enabled(True)
     
     def update_scale_range(self, vmin: float, vmax: float):
         """Update the scale spinboxes with data range."""
@@ -951,7 +1573,11 @@ class AxisSelectionDialog(QDialog):
         type_layout = QHBoxLayout()
         self.type_1d = QRadioButton("1D Plot")
         self.type_2d = QRadioButton("2D Plot")
-        self.type_1d.setChecked(True)
+        # Default to detected plot type if available
+        if self.detected_spec and self.detected_spec.y_key:
+            self.type_2d.setChecked(True)
+        else:
+            self.type_1d.setChecked(True)
         self.type_group = QButtonGroup()
         self.type_group.addButton(self.type_1d)
         self.type_group.addButton(self.type_2d)
@@ -963,24 +1589,40 @@ class AxisSelectionDialog(QDialog):
 
         self.data_combo = QComboBox()
         self.data_combo.addItems(datasets)
-        if 'S21' in datasets:
+        if self.detected_spec and self.detected_spec.data_key in datasets:
+            self.data_combo.setCurrentText(self.detected_spec.data_key)
+        elif 'S21' in datasets:
             self.data_combo.setCurrentText('S21')
         manual_layout.addRow("Data dataset:", self.data_combo)
+        
+        # Data label - defaults to dataset name
+        default_data_label = self.data_combo.currentText()
+        self.data_label_edit = QLineEdit(default_data_label)
+        manual_layout.addRow("Data label:", self.data_label_edit)
 
         x_group = QGroupBox("X-Axis")
         x_layout = QFormLayout()
         self.x_key_combo = QComboBox()
         self.x_key_combo.addItems(datasets)
         self.x_key_combo.setEditable(True)
-        if 'Frequency' in datasets:
+        # Default to detected x_key if available
+        if self.detected_spec and self.detected_spec.x_key in datasets:
+            self.x_key_combo.setCurrentText(self.detected_spec.x_key)
+        elif 'Frequency' in datasets:
             self.x_key_combo.setCurrentText('Frequency')
         x_layout.addRow("Dataset:", self.x_key_combo)
-        self.x_label_edit = QLineEdit("X")
+        # Default label to detected label or dataset name
+        default_x_label = self.detected_spec.x_label if self.detected_spec else self.x_key_combo.currentText()
+        self.x_label_edit = QLineEdit(default_x_label)
         x_layout.addRow("Label:", self.x_label_edit)
         self.x_scale_spin = QDoubleSpinBox()
         self.x_scale_spin.setDecimals(12)
         self.x_scale_spin.setRange(1e-15, 1e15)
-        self.x_scale_spin.setValue(1.0)
+        # Default to detected scale if available
+        if self.detected_spec:
+            self.x_scale_spin.setValue(self.detected_spec.x_scale)
+        else:
+            self.x_scale_spin.setValue(1.0)
         x_layout.addRow("Scale factor:", self.x_scale_spin)
 
         x_scale_presets = QHBoxLayout()
@@ -999,17 +1641,29 @@ class AxisSelectionDialog(QDialog):
         self.y_key_combo = QComboBox()
         self.y_key_combo.addItems(datasets)
         self.y_key_combo.setEditable(True)
-        if 'Power' in datasets:
+        # Default to detected y_key if available
+        if self.detected_spec and self.detected_spec.y_key and self.detected_spec.y_key in datasets:
+            self.y_key_combo.setCurrentText(self.detected_spec.y_key)
+        elif 'Power' in datasets:
             self.y_key_combo.setCurrentText('Power')
         elif 'Gate Voltage' in datasets:
             self.y_key_combo.setCurrentText('Gate Voltage')
         y_layout.addRow("Dataset:", self.y_key_combo)
-        self.y_label_edit = QLineEdit("Y")
+        # Default label to detected label or dataset name
+        if self.detected_spec and self.detected_spec.y_label:
+            default_y_label = self.detected_spec.y_label
+        else:
+            default_y_label = self.y_key_combo.currentText()
+        self.y_label_edit = QLineEdit(default_y_label)
         y_layout.addRow("Label:", self.y_label_edit)
         self.y_scale_spin = QDoubleSpinBox()
         self.y_scale_spin.setDecimals(12)
         self.y_scale_spin.setRange(1e-15, 1e15)
-        self.y_scale_spin.setValue(1.0)
+        # Default to detected scale if available
+        if self.detected_spec and self.detected_spec.y_scale:
+            self.y_scale_spin.setValue(self.detected_spec.y_scale)
+        else:
+            self.y_scale_spin.setValue(1.0)
         y_layout.addRow("Scale factor:", self.y_scale_spin)
 
         y_scale_presets = QHBoxLayout()
@@ -1021,14 +1675,25 @@ class AxisSelectionDialog(QDialog):
         y_scale_presets.addStretch()
         y_layout.addRow("Presets:", y_scale_presets)
         self.y_group.setLayout(y_layout)
-        self.y_group.setEnabled(False)
+        # Enable/disable Y-axis group based on plot type
+        self.y_group.setEnabled(self.type_2d.isChecked())
         manual_layout.addRow(self.y_group)
 
         inst_layout = QHBoxLayout()
         self.inst_cw = QRadioButton("CW (VNA)")
         self.inst_rfsoc = QRadioButton("RFSOC")
         self.inst_generic = QRadioButton("Generic")
-        self.inst_generic.setChecked(True)
+        # Default to detected data type if available
+        if self.detected_spec:
+            exp_type = self.detected_spec.exp_type
+            if exp_type in (ExperimentType.CW_1D, ExperimentType.CW_2D):
+                self.inst_cw.setChecked(True)
+            elif exp_type in (ExperimentType.RFSOC_1D, ExperimentType.RFSOC_2D):
+                self.inst_rfsoc.setChecked(True)
+            else:
+                self.inst_generic.setChecked(True)
+        else:
+            self.inst_generic.setChecked(True)
         self.inst_group = QButtonGroup()
         self.inst_group.addButton(self.inst_cw)
         self.inst_group.addButton(self.inst_rfsoc)
@@ -1050,10 +1715,28 @@ class AxisSelectionDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-        self.x_key_combo.currentTextChanged.connect(
-            lambda t: self.x_label_edit.setText(t) if self.x_label_edit.text() in ("X", "") else None)
-        self.y_key_combo.currentTextChanged.connect(
-            lambda t: self.y_label_edit.setText(t) if self.y_label_edit.text() in ("Y", "") else None)
+        # Auto-update labels when dataset changes (if label matches old dataset name or is generic)
+        def update_data_label(new_text):
+            current = self.data_label_edit.text()
+            # Update if label is empty or matches any dataset name
+            if current == "" or current in datasets:
+                self.data_label_edit.setText(new_text)
+        
+        def update_x_label(new_text):
+            current = self.x_label_edit.text()
+            # Update if label is generic, empty, or matches any dataset name
+            if current in ("X", "") or current in datasets:
+                self.x_label_edit.setText(new_text)
+        
+        def update_y_label(new_text):
+            current = self.y_label_edit.text()
+            # Update if label is generic, empty, or matches any dataset name
+            if current in ("Y", "") or current in datasets:
+                self.y_label_edit.setText(new_text)
+        
+        self.data_combo.currentTextChanged.connect(update_data_label)
+        self.x_key_combo.currentTextChanged.connect(update_x_label)
+        self.y_key_combo.currentTextChanged.connect(update_y_label)
 
     def _get_available_datasets(self) -> List[str]:
         datasets = []
@@ -1116,7 +1799,8 @@ class AxisSelectionDialog(QDialog):
             y_key=y_key,
             y_label=y_label,
             y_scale=y_scale,
-            data_key=data_key
+            data_key=data_key,
+            data_label=self.data_label_edit.text() or data_key
         )
         self.accept()
 
@@ -1448,6 +2132,7 @@ class PlotWidget1D(QWidget):
         self.settings = settings
         self._current_transform = 0
         self._zoom_completed_callback = None
+        self._callout_added_callback = None
 
         self.figure = plt.figure(figsize=(8, 6))
         self.canvas = FigureCanvas(self.figure)
@@ -1480,11 +2165,35 @@ class PlotWidget1D(QWidget):
         self._callouts = []  # List of (x, y, annotation) tuples
         self._hover_annotation = None
         
+        # Delta callout mode state
+        self._delta_callout_mode = False
+        self._delta_callouts = []  # List of ((x1, y1), (x2, y2)) tuples
+        self._delta_callout_first_point = None  # Stores first point while waiting for second
+        self._delta_callout_added_callback = None
+        
+        # Rotate S21 state
+        self._rotate_s21 = False
+        
+        # Annotation lines storage - each entry is (value, color, linestyle, linewidth)
+        self._vlines = []  # List of (x_value, color, linestyle, linewidth) tuples
+        self._hlines = []  # List of (y_value, color, linestyle, linewidth) tuples
+        
+        # Fitting state
+        self._fit_result = None  # FitResult object
+        self._fit_line = None    # matplotlib Line2D for fit curve
+        self._show_fit = True
+        self._show_residuals = False
+        self._fit_x_data = None  # x data used for fit
+        self._fit_y_data = None  # y data used for fit
+        
         # Connect mouse events for zoom
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         self.canvas.mpl_connect('resize_event', self._on_resize)
+        
+        # Make widget focusable for keyboard events
+        self.setFocusPolicy(Qt.StrongFocus)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1501,11 +2210,20 @@ class PlotWidget1D(QWidget):
         """Set callback to be called when zoom is completed."""
         self._zoom_completed_callback = callback
 
+    def set_callout_added_callback(self, callback):
+        """Set callback to be called when a callout is added."""
+        self._callout_added_callback = callback
+
+    def set_delta_callout_added_callback(self, callback):
+        """Set callback to be called when a delta callout is added."""
+        self._delta_callout_added_callback = callback
+
     def set_zoom_mode(self, enabled: bool):
         """Enable or disable zoom mode."""
         self._zoom_mode = enabled
         if enabled:
             self.canvas.setCursor(Qt.CrossCursor)
+            self.setFocus()  # Grab keyboard focus for Escape key
         else:
             self.canvas.setCursor(Qt.ArrowCursor)
             if self._zoom_rect is not None:
@@ -1552,8 +2270,10 @@ class PlotWidget1D(QWidget):
         self._callout_mode = enabled
         if enabled:
             self.canvas.setCursor(Qt.CrossCursor)
-            # Disable zoom mode if callout mode is enabled
+            self.setFocus()  # Grab keyboard focus for Escape key
+            # Disable zoom mode and delta callout mode
             self._zoom_mode = False
+            self._delta_callout_mode = False
         else:
             self.canvas.setCursor(Qt.ArrowCursor)
             # Remove hover annotation
@@ -1565,14 +2285,96 @@ class PlotWidget1D(QWidget):
                 self._hover_annotation = None
                 self.canvas.draw_idle()
 
+    def set_delta_callout_mode(self, enabled: bool):
+        """Enable or disable delta callout mode."""
+        self._delta_callout_mode = enabled
+        if enabled:
+            self.canvas.setCursor(Qt.CrossCursor)
+            self.setFocus()  # Grab keyboard focus for Escape key
+            # Disable zoom mode and regular callout mode
+            self._zoom_mode = False
+            self._callout_mode = False
+            self._delta_callout_first_point = None  # Reset first point
+        else:
+            self.canvas.setCursor(Qt.ArrowCursor)
+            self._delta_callout_first_point = None  # Reset first point
+            # Remove hover annotation
+            if self._hover_annotation is not None:
+                try:
+                    self._hover_annotation.remove()
+                except:
+                    pass
+                self._hover_annotation = None
+                self.canvas.draw_idle()
+
     def clear_callouts(self):
-        """Remove all callout annotations."""
+        """Remove all callout annotations (point and delta)."""
         self._callouts = []
+        self._delta_callouts = []
+        self.update_plot()
+
+    def set_rotate_s21(self, enabled: bool):
+        """Enable or disable S21 rotation."""
+        self._rotate_s21 = enabled
+        self.update_plot()
+
+    def add_vline(self, x_value: float, color: str = 'green', linestyle: str = '--', linewidth: float = 1.5):
+        """Add a vertical line at specified x value with style options."""
+        self._vlines.append((x_value, color, linestyle, linewidth))
+        self.update_plot()
+
+    def add_hline(self, y_value: float, color: str = 'blue', linestyle: str = '--', linewidth: float = 1.5):
+        """Add a horizontal line at specified y value with style options."""
+        self._hlines.append((y_value, color, linestyle, linewidth))
+        self.update_plot()
+
+    def clear_lines(self):
+        """Remove all annotation lines."""
+        self._vlines = []
+        self._hlines = []
         self.update_plot()
 
     def _on_mouse_press(self, event):
         """Handle mouse press for zoom or callout."""
         if event.inaxes != self.ax:
+            return
+        
+        # Check for Ctrl key using Qt (more reliable than matplotlib's event.key)
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
+        modifiers = QApplication.keyboardModifiers()
+        ctrl_pressed = modifiers == Qt.ControlModifier
+        
+        # Ctrl+click to delete nearest callout
+        if event.button == 1 and ctrl_pressed and self._callouts:
+            if event.xdata is not None and event.ydata is not None:
+                # Calculate tolerance as 2% of axis range
+                xlim = self.ax.get_xlim()
+                ylim = self.ax.get_ylim()
+                x_tol = abs(xlim[1] - xlim[0]) * 0.02
+                y_tol = abs(ylim[1] - ylim[0]) * 0.02
+                
+                # Find nearest callout (considering interchange state for display)
+                min_dist = float('inf')
+                nearest_idx = None
+                for i, (x_val, y_val) in enumerate(self._callouts):
+                    if self._interchanged:
+                        # When interchanged: y on X-axis, x on Y-axis
+                        dx = (y_val - event.xdata) / x_tol if x_tol > 0 else 0
+                        dy = (x_val - event.ydata) / y_tol if y_tol > 0 else 0
+                    else:
+                        # Normal: x on X-axis, y on Y-axis
+                        dx = (x_val - event.xdata) / x_tol if x_tol > 0 else 0
+                        dy = (y_val - event.ydata) / y_tol if y_tol > 0 else 0
+                    dist = (dx**2 + dy**2) ** 0.5
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_idx = i
+                
+                # If within tolerance (normalized distance < 1), remove it
+                if nearest_idx is not None and min_dist < 1.0:
+                    self._callouts.pop(nearest_idx)
+                    self.update_plot()
             return
         
         # Callout mode - add annotation on click
@@ -1581,6 +2383,9 @@ class PlotWidget1D(QWidget):
                 # Find nearest data point
                 # Find nearest data point based on interchange state
                 data = self.data_source.get_data()
+                # Apply S21 rotation if enabled
+                if self._rotate_s21:
+                    data = rotate_s21(data)
                 _, _, transform = self.transforms[self._current_transform]
                 try:
                     zs = transform(data)
@@ -1602,6 +2407,47 @@ class PlotWidget1D(QWidget):
                 y_val = zs[idx]
                 self._callouts.append((x_val, y_val))
                 self.update_plot()
+                # Notify that callout was added (for single-add mode)
+                if self._callout_added_callback:
+                    self._callout_added_callback()
+            return
+        
+        # Delta callout mode - two clicks to show difference
+        if self._delta_callout_mode and event.button == 1:
+            if event.xdata is not None:
+                # Find nearest data point
+                data = self.data_source.get_data()
+                if self._rotate_s21:
+                    data = rotate_s21(data)
+                _, _, transform = self.transforms[self._current_transform]
+                try:
+                    zs = transform(data)
+                except:
+                    zs = np.abs(data)
+                zs = np.where(np.isinf(zs), np.nan, zs)
+                
+                if self._interchanged:
+                    idx = np.argmin(np.abs(self.xs - event.ydata))
+                else:
+                    idx = np.argmin(np.abs(self.xs - event.xdata))
+                
+                x_val = self.xs[idx]
+                y_val = zs[idx]
+                
+                if self._delta_callout_first_point is None:
+                    # First click - store first point
+                    self._delta_callout_first_point = (x_val, y_val)
+                    self.update_plot()  # Show first point marker
+                else:
+                    # Second click - create delta callout
+                    first_point = self._delta_callout_first_point
+                    second_point = (x_val, y_val)
+                    self._delta_callouts.append((first_point, second_point))
+                    self._delta_callout_first_point = None
+                    self.update_plot()
+                    # Notify that delta callout was added
+                    if self._delta_callout_added_callback:
+                        self._delta_callout_added_callback()
             return
         
         # Zoom mode
@@ -1610,11 +2456,14 @@ class PlotWidget1D(QWidget):
 
     def _on_mouse_move(self, event):
         """Handle mouse move for zoom rectangle or callout hover."""
-        # Callout mode hover
-        if self._callout_mode and not self._zoom_mode:
+        # Callout mode hover (also works in delta callout mode)
+        if (self._callout_mode or self._delta_callout_mode) and not self._zoom_mode:
             if event.inaxes == self.ax and event.xdata is not None:
                 # Get transformed data
                 data = self.data_source.get_data()
+                # Apply S21 rotation if enabled
+                if self._rotate_s21:
+                    data = rotate_s21(data)
                 _, _, transform = self.transforms[self._current_transform]
                 try:
                     zs = transform(data)
@@ -1741,8 +2590,123 @@ class PlotWidget1D(QWidget):
         else:
             self.canvas.draw_idle()
 
+    # --- Fitting Methods ---
+    
+    def fit_data(self, model_name: str, initial_guesses: Dict[str, Optional[float]], 
+                 visible_only: bool = False) -> FitResult:
+        """
+        Perform curve fit on data.
+        
+        Args:
+            model_name: Name of fit model from FIT_MODELS
+            initial_guesses: Dict of parameter name -> initial value
+            visible_only: If True, fit only visible data range
+            
+        Returns:
+            FitResult object
+            
+        Raises:
+            ValueError: If fit fails
+        """
+        # Get current data
+        label, ylabel, transform = self.transforms[self._current_transform]
+        data = self.data_source.get_data()
+        
+        if self._rotate_s21:
+            data = rotate_s21(data)
+        
+        try:
+            y_data = transform(data)
+        except Exception:
+            y_data = np.abs(data)
+        
+        x_data = self.xs.copy()
+        y_data = np.where(np.isinf(y_data), np.nan, y_data)
+        
+        # Handle interchanged axes
+        if self._interchanged:
+            x_data, y_data = y_data, x_data
+        
+        # Filter to visible range if requested
+        if visible_only and self._xlim is not None:
+            x_min, x_max = min(self._xlim), max(self._xlim)
+            mask = (x_data >= x_min) & (x_data <= x_max)
+            x_data = x_data[mask]
+            y_data = y_data[mask]
+        
+        # Remove NaN values
+        valid_mask = ~np.isnan(x_data) & ~np.isnan(y_data)
+        x_data = x_data[valid_mask]
+        y_data = y_data[valid_mask]
+        
+        if len(x_data) < len(FIT_MODELS[model_name]['param_names']):
+            raise ValueError("Not enough data points for fit")
+        
+        # Store data for residuals
+        self._fit_x_data = x_data
+        self._fit_y_data = y_data
+        
+        # Get units from axis labels
+        if self._interchanged:
+            x_unit = parse_unit(ylabel)
+            y_unit = parse_unit(self.data_source.spec.x_label)
+        else:
+            x_unit = parse_unit(self.data_source.spec.x_label)
+            y_unit = parse_unit(ylabel)
+        
+        # Perform fit
+        result = Fitter.fit(x_data, y_data, model_name, initial_guesses, x_unit, y_unit)
+        self._fit_result = result
+        
+        # Redraw to show fit curve
+        self.update_plot()
+        
+        return result
+    
+    def clear_fit(self):
+        """Clear fit results."""
+        self._fit_result = None
+        self._fit_line = None
+        self._fit_x_data = None
+        self._fit_y_data = None
+        self.update_plot()
+    
+    def set_show_fit(self, show: bool):
+        """Set whether to show fit curve."""
+        self._show_fit = show
+        self.update_plot()
+    
+    def set_show_residuals(self, show: bool):
+        """Set whether to show residuals plot."""
+        self._show_residuals = show
+        self.update_plot()
+    
+    def get_fit_result(self) -> Optional[FitResult]:
+        """Get current fit result."""
+        return self._fit_result
+    
+    def _draw_fit_curve(self):
+        """Draw fit curve on the plot."""
+        if self._fit_result is None or not self._show_fit:
+            return
+        
+        model = FIT_MODELS[self._fit_result.model_name]
+        func = model['func']
+        
+        # Generate smooth x values for fit curve within the fitted range
+        x_min, x_max = self._fit_result.x_range
+        x_fit = np.linspace(x_min, x_max, 500)
+        y_fit = func(x_fit, *self._fit_result.params)
+        
+        self.ax.plot(x_fit, y_fit, 
+                     color=self.settings.fit_color,
+                     linestyle=self.settings.fit_line_style,
+                     linewidth=self.settings.fit_line_width, 
+                     label='Fit', zorder=10)
+
     def set_transform(self, index: int):
         self._current_transform = index
+        self.clear_fit()  # Clear fit on transform change
         self.update_plot()
 
     def update_settings(self, settings: PlotSettings):
@@ -1755,6 +2719,10 @@ class PlotWidget1D(QWidget):
 
             label, ylabel, transform = self.transforms[self._current_transform]
             data = self.data_source.get_data()
+            
+            # Apply S21 rotation if enabled
+            if self._rotate_s21:
+                data = rotate_s21(data)
 
             try:
                 zs = transform(data)
@@ -1867,6 +2835,12 @@ class PlotWidget1D(QWidget):
             if self.settings.grid_enabled:
                 self.ax.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
 
+            # Draw annotation lines
+            for x_val, color, linestyle, linewidth in self._vlines:
+                self.ax.axvline(x=x_val, color=color, linestyle=linestyle, linewidth=linewidth, alpha=0.8)
+            for y_val, color, linestyle, linewidth in self._hlines:
+                self.ax.axhline(y=y_val, color=color, linestyle=linestyle, linewidth=linewidth, alpha=0.8)
+
             # Draw callout annotations
             # Callouts store original data values (x from xs, y from zs)
             for x_val, y_val in self._callouts:
@@ -1892,6 +2866,62 @@ class PlotWidget1D(QWidget):
                 )
                 ann.draggable()
 
+            # Draw delta callout first point marker (while waiting for second click)
+            if self._delta_callout_first_point is not None:
+                x1, y1 = self._delta_callout_first_point
+                if self._interchanged:
+                    plot_x1 = y1 if not np.isnan(y1) else 0
+                    plot_y1 = x1
+                else:
+                    plot_x1 = x1
+                    plot_y1 = y1 if not np.isnan(y1) else 0
+                if not np.isnan(plot_x1) and not np.isnan(plot_y1):
+                    self.ax.plot(plot_x1, plot_y1, 'ro', markersize=7, markeredgecolor='darkred', markeredgewidth=2)
+
+            # Draw delta callouts (connecting lines with difference annotation)
+            for (x1, y1), (x2, y2) in self._delta_callouts:
+                # Compute plot positions based on interchange state
+                if self._interchanged:
+                    plot_x1 = y1 if not np.isnan(y1) else 0
+                    plot_y1 = x1
+                    plot_x2 = y2 if not np.isnan(y2) else 0
+                    plot_y2 = x2
+                else:
+                    plot_x1 = x1
+                    plot_y1 = y1 if not np.isnan(y1) else 0
+                    plot_x2 = x2
+                    plot_y2 = y2 if not np.isnan(y2) else 0
+                
+                # Draw markers at both points
+                if not np.isnan(plot_x1) and not np.isnan(plot_y1):
+                    self.ax.plot(plot_x1, plot_y1, 'ro', markersize=5)
+                if not np.isnan(plot_x2) and not np.isnan(plot_y2):
+                    self.ax.plot(plot_x2, plot_y2, 'ro', markersize=5)
+                
+                # Draw connecting line
+                self.ax.plot([plot_x1, plot_x2], [plot_y1, plot_y2], 'r-', linewidth=1.5, alpha=0.7)
+                
+                # Calculate deltas
+                dx = x2 - x1
+                dy = y2 - y1
+                
+                # Create annotation at midpoint
+                mid_x = (plot_x1 + plot_x2) / 2
+                mid_y = (plot_y1 + plot_y2) / 2
+                dy_str = 'NaN' if (np.isnan(y1) or np.isnan(y2)) else f'{dy:.4g}'
+                ann = self.ax.annotate(
+                    f'Δx={dx:.4g}\nΔy={dy_str}',
+                    xy=(mid_x, mid_y),
+                    xytext=(10, 10), textcoords='offset points',
+                    fontsize=9,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='red', alpha=0.9),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='red')
+                )
+                ann.draggable()
+
+            # Draw fit curve if available
+            self._draw_fit_curve()
+
             self.figure.tight_layout()
             self.canvas.draw()
         except Exception as e:
@@ -1912,6 +2942,7 @@ class PlotWidget2D(QWidget):
         self._cbar_ax = None
         self._pcm = None
         self._zoom_completed_callback = None
+        self._callout_added_callback = None
         
         # Check if this is stitched data
         self._is_stitched = hasattr(data_source, 'is_stitched') and data_source.is_stitched()
@@ -1919,7 +2950,7 @@ class PlotWidget2D(QWidget):
         # Disable linecuts for stitched data
         self._show_linecuts = False
 
-        self.figure = plt.figure(figsize=(8, 6))
+        self.figure = plt.figure(figsize=(10, 8))
         self.canvas = FigureCanvas(self.figure)
 
         self.xs, self.ys = data_source.get_axes()
@@ -1952,17 +2983,35 @@ class PlotWidget2D(QWidget):
         self._callouts = []  # List of (x, y, z) tuples
         self._hover_annotation = None
         
+        # Delta callout mode state
+        self._delta_callout_mode = False
+        self._delta_callouts = []  # List of ((x1, y1, z1), (x2, y2, z2)) tuples
+        self._delta_callout_first_point = None  # Stores first point while waiting for second
+        self._delta_callout_added_callback = None
+        
+        # Rotate S21 state
+        self._rotate_s21 = False
+        
+        # Annotation lines storage - each entry is (value, color, linestyle, linewidth)
+        self._vlines = []  # List of (x_value, color, linestyle, linewidth) tuples
+        self._hlines = []  # List of (y_value, color, linestyle, linewidth) tuples
+        
         # Interchange axes state
         self._interchanged = False
+        
+        # Fitting state (for horizontal linecut - ax_xcut)
+        self._fit_result = None  # FitResult object
+        self._fit_line = None    # matplotlib Line2D for fit curve
+        self._show_fit = True
+        self._show_residuals = False
+        self._fit_x_data = None  # x data used for fit
+        self._fit_y_data = None  # y data used for fit
 
         # Initialize axes (will be configured in _setup_axes)
         self.ax_2d = None
         self.ax_xcut = None
         self.ax_ycut = None
-        self.slider_y_ax = None
-        self.slider_x_ax = None
-        self.slider_y = None
-        self.slider_x = None
+        self._cbar_ax = None
 
         self._setup_axes()
         
@@ -1971,25 +3020,211 @@ class PlotWidget2D(QWidget):
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
         self.canvas.mpl_connect('motion_notify_event', self._on_mouse_move)
         self.canvas.mpl_connect('resize_event', self._on_resize)
+        self.canvas.mpl_connect('draw_event', self._on_draw)
+        
+        # Make widget focusable for keyboard events
+        self.setFocusPolicy(Qt.StrongFocus)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.canvas)
+        # Modern thin-bar slider style
+        self._slider_style_v = """
+            QSlider::groove:vertical {
+                background: transparent;
+                width: 20px;
+            }
+            QSlider::handle:vertical {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #94a3b8, stop:0.5 #64748b, stop:1 #94a3b8);
+                height: 6px;
+                margin: 0 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:vertical:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #64748b, stop:0.5 #475569, stop:1 #64748b);
+            }
+            QSlider::add-page:vertical {
+                background: rgba(100, 116, 139, 0.25);
+                margin: 0 7px;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:vertical {
+                background: rgba(100, 116, 139, 0.1);
+                margin: 0 7px;
+                border-radius: 3px;
+            }
+        """
+        
+        self._slider_style_h = """
+            QSlider::groove:horizontal {
+                background: transparent;
+                height: 20px;
+            }
+            QSlider::handle:horizontal {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #94a3b8, stop:0.5 #64748b, stop:1 #94a3b8);
+                width: 6px;
+                margin: 4px 0;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #64748b, stop:0.5 #475569, stop:1 #64748b);
+            }
+            QSlider::add-page:horizontal {
+                background: rgba(100, 116, 139, 0.1);
+                margin: 7px 0;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(100, 116, 139, 0.25);
+                margin: 7px 0;
+                border-radius: 3px;
+            }
+        """
+
+        # Build layout with integrated sliders
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Top row: canvas + Y slider
+        top_row = QHBoxLayout()
+        top_row.setSpacing(2)
+        top_row.addWidget(self.canvas, 1)
+        
+        # Y slider container (for top/bottom spacing)
+        self.slider_y_container = QWidget()
+        slider_y_layout = QVBoxLayout(self.slider_y_container)
+        slider_y_layout.setContentsMargins(0, 0, 0, 0)
+        slider_y_layout.setSpacing(0)
+        
+        self.slider_y_top_spacer = QWidget()
+        self.slider_y_top_spacer.setFixedHeight(0)
+        slider_y_layout.addWidget(self.slider_y_top_spacer)
+        
+        self.slider_y = QSlider(Qt.Vertical)
+        self.slider_y.setMinimum(0)
+        self.slider_y.setMaximum(max(1, len(self.ys) - 1))
+        self.slider_y.setValue(0)
+        self.slider_y.setInvertedAppearance(True)
+        self.slider_y.setFixedWidth(20)
+        self.slider_y.valueChanged.connect(self._on_slider_changed)
+        self.slider_y.setStyleSheet(self._slider_style_v)
+        slider_y_layout.addWidget(self.slider_y, 1)
+        
+        self.slider_y_bottom_spacer = QWidget()
+        self.slider_y_bottom_spacer.setFixedHeight(0)
+        slider_y_layout.addWidget(self.slider_y_bottom_spacer)
+        
+        self.slider_y_container.hide()
+        top_row.addWidget(self.slider_y_container)
+        
+        main_layout.addLayout(top_row, 1)
+        
+        # Bottom row: X slider + spacer
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(2)
+        
+        # X slider container (for left/right spacing)
+        self.slider_x_container = QWidget()
+        slider_x_layout = QHBoxLayout(self.slider_x_container)
+        slider_x_layout.setContentsMargins(0, 0, 0, 0)
+        slider_x_layout.setSpacing(0)
+        
+        self.slider_x_left_spacer = QWidget()
+        self.slider_x_left_spacer.setFixedWidth(0)
+        slider_x_layout.addWidget(self.slider_x_left_spacer)
+        
+        self.slider_x = QSlider(Qt.Horizontal)
+        self.slider_x.setMinimum(0)
+        self.slider_x.setMaximum(max(1, len(self.xs) - 1))
+        self.slider_x.setValue(0)
+        self.slider_x.setFixedHeight(20)
+        self.slider_x.valueChanged.connect(self._on_slider_changed)
+        self.slider_x.setStyleSheet(self._slider_style_h)
+        slider_x_layout.addWidget(self.slider_x, 1)
+        
+        self.slider_x_right_spacer = QWidget()
+        self.slider_x_right_spacer.setFixedWidth(0)
+        slider_x_layout.addWidget(self.slider_x_right_spacer)
+        
+        self.slider_x_container.hide()
+        bottom_row.addWidget(self.slider_x_container, 1)
+        
+        # Corner spacer to align with Y slider
+        self.slider_corner_spacer = QWidget()
+        self.slider_corner_spacer.setFixedSize(20, 20)
+        self.slider_corner_spacer.hide()
+        bottom_row.addWidget(self.slider_corner_spacer)
+        
+        main_layout.addLayout(bottom_row)
+
+    def _update_slider_alignment(self):
+        """Update slider spacers to match the 2D plot axes bounds."""
+        if self.ax_2d is None:
+            return
+            
+        # Get the axes bounding box in figure coordinates (0-1)
+        bbox = self.ax_2d.get_position()
+        canvas_width = self.canvas.width()
+        canvas_height = self.canvas.height()
+        
+        # Y slider spacers (top and bottom margins)
+        top_margin = int((1 - bbox.y1) * canvas_height)
+        bottom_margin = int(bbox.y0 * canvas_height)
+        self.slider_y_top_spacer.setFixedHeight(top_margin)
+        self.slider_y_bottom_spacer.setFixedHeight(bottom_margin)
+        
+        # X slider spacers (left and right margins)
+        left_margin = int(bbox.x0 * canvas_width)
+        right_margin = int((1 - bbox.x1) * canvas_width)
+        self.slider_x_left_spacer.setFixedWidth(left_margin)
+        self.slider_x_right_spacer.setFixedWidth(right_margin)
+
+    def _on_draw(self, event):
+        """Handle canvas draw to update slider alignment."""
+        if self._show_linecuts:
+            self._update_slider_alignment()
+
+    def _on_slider_changed(self, value):
+        """Handle Qt slider value change."""
+        # Clear fit when slider moves (data changes)
+        self._fit_result = None
+        self._fit_line = None
+        self._fit_x_data = None
+        self._fit_y_data = None
+        self.update_plot()
 
     def _on_resize(self, event):
-        """Handle canvas resize to keep labels visible."""
-        self.figure.tight_layout()
+        """Handle canvas resize by re-applying tight_layout."""
+        if self.ax_2d is None:
+            return
+        
+        if self._show_linecuts:
+            self.figure.tight_layout(rect=[0, 0, 1.0, 1.0])
+        else:
+            self.figure.tight_layout(rect=[0, 0, 0.82, 1.0])
+        
         self.canvas.draw_idle()
 
     def set_zoom_completed_callback(self, callback):
         """Set callback to be called when zoom is completed."""
         self._zoom_completed_callback = callback
 
+    def set_callout_added_callback(self, callback):
+        """Set callback to be called when a callout is added."""
+        self._callout_added_callback = callback
+
+    def set_delta_callout_added_callback(self, callback):
+        """Set callback to be called when a delta callout is added."""
+        self._delta_callout_added_callback = callback
+
     def set_zoom_mode(self, enabled: bool):
         """Enable or disable zoom mode."""
         self._zoom_mode = enabled
         if enabled:
             self.canvas.setCursor(Qt.CrossCursor)
+            self.setFocus()  # Grab keyboard focus for Escape key
         else:
             self.canvas.setCursor(Qt.ArrowCursor)
             # Clear any existing zoom rectangle
@@ -2050,6 +3285,18 @@ class PlotWidget2D(QWidget):
         spec.x_label = old_y_label
         spec.y_label = old_x_label
         
+        # Swap slider max values and current values
+        if hasattr(self, 'slider_x') and hasattr(self, 'slider_y'):
+            old_x_max = self.slider_x.maximum()
+            old_y_max = self.slider_y.maximum()
+            old_x_val = self.slider_x.value()
+            old_y_val = self.slider_y.value()
+            
+            self.slider_x.setMaximum(old_y_max)
+            self.slider_y.setMaximum(old_x_max)
+            self.slider_x.setValue(min(old_y_val, old_y_max))
+            self.slider_y.setValue(min(old_x_val, old_x_max))
+        
         self.update_plot()
 
     def set_callout_mode(self, enabled: bool):
@@ -2057,8 +3304,10 @@ class PlotWidget2D(QWidget):
         self._callout_mode = enabled
         if enabled:
             self.canvas.setCursor(Qt.CrossCursor)
-            # Disable zoom mode if callout mode is enabled
+            self.setFocus()  # Grab keyboard focus for Escape key
+            # Disable zoom mode and delta callout mode
             self._zoom_mode = False
+            self._delta_callout_mode = False
         else:
             self.canvas.setCursor(Qt.ArrowCursor)
             # Remove hover annotation
@@ -2070,14 +3319,91 @@ class PlotWidget2D(QWidget):
                 self._hover_annotation = None
                 self.canvas.draw_idle()
 
+    def set_delta_callout_mode(self, enabled: bool):
+        """Enable or disable delta callout mode."""
+        self._delta_callout_mode = enabled
+        if enabled:
+            self.canvas.setCursor(Qt.CrossCursor)
+            self.setFocus()  # Grab keyboard focus for Escape key
+            # Disable zoom mode and regular callout mode
+            self._zoom_mode = False
+            self._callout_mode = False
+            self._delta_callout_first_point = None  # Reset first point
+        else:
+            self.canvas.setCursor(Qt.ArrowCursor)
+            self._delta_callout_first_point = None  # Reset first point
+            # Remove hover annotation
+            if self._hover_annotation is not None:
+                try:
+                    self._hover_annotation.remove()
+                except:
+                    pass
+                self._hover_annotation = None
+                self.canvas.draw_idle()
+
     def clear_callouts(self):
-        """Remove all callout annotations."""
+        """Remove all callout annotations (point and delta)."""
         self._callouts = []
+        self._delta_callouts = []
+        self.update_plot()
+
+    def set_rotate_s21(self, enabled: bool):
+        """Enable or disable S21 rotation."""
+        self._rotate_s21 = enabled
+        self.update_plot()
+
+    def add_vline(self, x_value: float, color: str = 'green', linestyle: str = '--', linewidth: float = 1.5):
+        """Add a vertical line at specified x value with style options."""
+        self._vlines.append((x_value, color, linestyle, linewidth))
+        self.update_plot()
+
+    def add_hline(self, y_value: float, color: str = 'blue', linestyle: str = '--', linewidth: float = 1.5):
+        """Add a horizontal line at specified y value with style options."""
+        self._hlines.append((y_value, color, linestyle, linewidth))
+        self.update_plot()
+
+    def clear_lines(self):
+        """Remove all annotation lines."""
+        self._vlines = []
+        self._hlines = []
         self.update_plot()
 
     def _on_mouse_press(self, event):
         """Handle mouse press for zoom or callout."""
         if event.inaxes != self.ax_2d:
+            return
+        
+        # Check for Ctrl key using Qt (more reliable than matplotlib's event.key)
+        from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
+        modifiers = QApplication.keyboardModifiers()
+        ctrl_pressed = modifiers == Qt.ControlModifier
+        
+        # Ctrl+click to delete nearest callout
+        if event.button == 1 and ctrl_pressed and self._callouts:
+            if event.xdata is not None and event.ydata is not None:
+                # Calculate tolerance as 2% of axis range
+                xlim = self.ax_2d.get_xlim()
+                ylim = self.ax_2d.get_ylim()
+                x_tol = abs(xlim[1] - xlim[0]) * 0.02
+                y_tol = abs(ylim[1] - ylim[0]) * 0.02
+                
+                # Find nearest callout
+                min_dist = float('inf')
+                nearest_idx = None
+                for i, (x_val, y_val, z_val) in enumerate(self._callouts):
+                    # Normalized distance
+                    dx = (x_val - event.xdata) / x_tol if x_tol > 0 else 0
+                    dy = (y_val - event.ydata) / y_tol if y_tol > 0 else 0
+                    dist = (dx**2 + dy**2) ** 0.5
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_idx = i
+                
+                # If within tolerance (normalized distance < 1), remove it
+                if nearest_idx is not None and min_dist < 1.0:
+                    self._callouts.pop(nearest_idx)
+                    self.update_plot()
             return
         
         # Callout mode - add annotation on click
@@ -2110,6 +3436,9 @@ class PlotWidget2D(QWidget):
                     if best_point:
                         self._callouts.append(best_point)
                         self.update_plot()
+                        # Notify that callout was added (for single-add mode)
+                        if self._callout_added_callback:
+                            self._callout_added_callback()
                 else:
                     # Single dataset: original behavior
                     x_idx = np.argmin(np.abs(self.xs - event.xdata))
@@ -2133,6 +3462,76 @@ class PlotWidget2D(QWidget):
                     # Store callout data (including NaN values)
                     self._callouts.append((x_val, y_val, z_val))
                     self.update_plot()
+                    # Notify that callout was added (for single-add mode)
+                    if self._callout_added_callback:
+                        self._callout_added_callback()
+            return
+        
+        # Delta callout mode - two clicks to show difference
+        if self._delta_callout_mode and event.button == 1:
+            if event.xdata is not None and event.ydata is not None:
+                _, _, transform = self.transforms[self._current_transform]
+                
+                if self._is_stitched:
+                    # Search across all datasets to find nearest point
+                    best_dist = float('inf')
+                    best_point = None
+                    
+                    for xs, ys, data in self.data_source.get_all_datasets():
+                        x_idx = np.argmin(np.abs(xs - event.xdata))
+                        y_idx = np.argmin(np.abs(ys - event.ydata))
+                        x_val = xs[x_idx]
+                        y_val = ys[y_idx]
+                        dist = (x_val - event.xdata)**2 + (y_val - event.ydata)**2
+                        
+                        if dist < best_dist:
+                            best_dist = dist
+                            try:
+                                zs = transform(data)
+                            except:
+                                zs = np.abs(data)
+                            zs = np.where(np.isinf(zs), np.nan, zs)
+                            z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                            best_point = (x_val, y_val, z_val)
+                    
+                    if best_point:
+                        if self._delta_callout_first_point is None:
+                            self._delta_callout_first_point = best_point
+                            self.update_plot()
+                        else:
+                            self._delta_callouts.append((self._delta_callout_first_point, best_point))
+                            self._delta_callout_first_point = None
+                            self.update_plot()
+                            if self._delta_callout_added_callback:
+                                self._delta_callout_added_callback()
+                else:
+                    # Single dataset
+                    x_idx = np.argmin(np.abs(self.xs - event.xdata))
+                    y_idx = np.argmin(np.abs(self.ys - event.ydata))
+                    x_val = self.xs[x_idx]
+                    y_val = self.ys[y_idx]
+                    
+                    data = self.data_source.get_data()
+                    try:
+                        zs = transform(data)
+                    except:
+                        zs = np.abs(data)
+                    zs = np.where(np.isinf(zs), np.nan, zs)
+                    if getattr(self, '_interchanged', False):
+                        zs = zs.T
+                    z_val = zs[y_idx, x_idx] if zs.ndim > 1 else zs[x_idx]
+                    
+                    point = (x_val, y_val, z_val)
+                    
+                    if self._delta_callout_first_point is None:
+                        self._delta_callout_first_point = point
+                        self.update_plot()
+                    else:
+                        self._delta_callouts.append((self._delta_callout_first_point, point))
+                        self._delta_callout_first_point = None
+                        self.update_plot()
+                        if self._delta_callout_added_callback:
+                            self._delta_callout_added_callback()
             return
         
         # Zoom mode
@@ -2141,8 +3540,8 @@ class PlotWidget2D(QWidget):
 
     def _on_mouse_move(self, event):
         """Handle mouse move for zoom rectangle or callout hover."""
-        # Callout mode hover
-        if self._callout_mode and not self._zoom_mode:
+        # Callout mode hover (also works in delta callout mode)
+        if (self._callout_mode or self._delta_callout_mode) and not self._zoom_mode:
             if event.inaxes == self.ax_2d and event.xdata is not None and event.ydata is not None:
                 _, _, transform = self.transforms[self._current_transform]
                 
@@ -2294,50 +3693,51 @@ class PlotWidget2D(QWidget):
             self.canvas.draw_idle()
 
     def _setup_axes(self):
-        """Setup axes based on linecut visibility."""
+        """Setup axes based on linecut visibility.
+        
+        Uses subplots for main plots (tight_layout compatible) and 
+        manual add_axes for colorbar.
+        """
         self.figure.clear()
         self._colorbar = None
         self._cbar_ax = None
         self._pcm = None
 
         if self._show_linecuts:
-            # Layout with linecuts: 2x2 grid
-            self.ax_2d = self.figure.add_axes([0.08, 0.55, 0.35, 0.38])  # top-left
-            self.ax_xcut = self.figure.add_axes([0.55, 0.55, 0.35, 0.38])  # top-right
-            self.ax_ycut = self.figure.add_axes([0.08, 0.12, 0.35, 0.35])  # bottom-left
+            # Layout with linecuts: 2x2 grid using subplots
+            self.ax_2d = self.figure.add_subplot(2, 2, 1)   # top-left
+            self.ax_xcut = self.figure.add_subplot(2, 2, 2) # top-right
+            self.ax_ycut = self.figure.add_subplot(2, 2, 3) # bottom-left
+            # bottom-right (2,2,4) is where we'll put the horizontal colorbar
             
-            # Colorbar axes (next to 2D plot)
-            self._cbar_ax = self.figure.add_axes([0.44, 0.55, 0.015, 0.38])
+            # Apply tight_layout
+            self.figure.tight_layout(rect=[0, 0, 1.0, 1.0])
             
-            # Sliders
-            self.slider_y_ax = self.figure.add_axes([0.92, 0.55, 0.02, 0.38])
-            self.slider_x_ax = self.figure.add_axes([0.08, 0.03, 0.35, 0.02])
+            # Horizontal colorbar placeholder (position will be set in update_plot to match ax_xcut)
+            self._cbar_ax = self.figure.add_axes([0.57, 0.45, 0.33, 0.03])
+            
+            # Show slider containers
+            if hasattr(self, 'slider_y_container'):
+                self.slider_y_container.show()
+                self.slider_x_container.show()
+                self.slider_corner_spacer.show()
         else:
-            # Layout without linecuts: single large plot
-            self.ax_2d = self.figure.add_axes([0.08, 0.08, 0.75, 0.87])
+            # Layout without linecuts: single plot using subplot
+            self.ax_2d = self.figure.add_subplot(111)
             self.ax_xcut = None
             self.ax_ycut = None
             
-            # Colorbar axes (on the right)
-            self._cbar_ax = self.figure.add_axes([0.85, 0.08, 0.03, 0.87])
+            # Apply tight_layout with rect to leave room for colorbar on right
+            self.figure.tight_layout(rect=[0, 0, 0.82, 1.0])
             
-            # No sliders needed
-            self.slider_y_ax = None
-            self.slider_x_ax = None
-
-        # Create sliders if needed
-        if self._show_linecuts:
-            self.slider_y = MplSlider(
-                self.slider_y_ax, '', 0, max(1, len(self.ys)-1),
-                valinit=0, valstep=1, orientation='vertical')
-            self.slider_x = MplSlider(
-                self.slider_x_ax, '', 0, max(1, len(self.xs)-1),
-                valinit=0, valstep=1, orientation='horizontal')
-            self.slider_y.on_changed(lambda _: self.update_plot())
-            self.slider_x.on_changed(lambda _: self.update_plot())
-        else:
-            self.slider_y = None
-            self.slider_x = None
+            # Vertical colorbar
+            self._cbar_ax = self.figure.add_axes([0.83, 0.15, 0.03, 0.73])
+            
+            # Hide slider containers
+            if hasattr(self, 'slider_y_container'):
+                self.slider_y_container.hide()
+                self.slider_x_container.hide()
+                self.slider_corner_spacer.hide()
 
     def set_show_linecuts(self, show: bool):
         """Toggle linecut visibility. Disabled for stitched data."""
@@ -2348,8 +3748,138 @@ class PlotWidget2D(QWidget):
             self._setup_axes()
             self.update_plot()
 
+    # --- Fitting Methods (for horizontal linecut) ---
+    
+    def fit_data(self, model_name: str, initial_guesses: Dict[str, Optional[float]], 
+                 visible_only: bool = False) -> FitResult:
+        """
+        Perform curve fit on horizontal linecut data.
+        
+        Args:
+            model_name: Name of fit model from FIT_MODELS
+            initial_guesses: Dict of parameter name -> initial value
+            visible_only: If True, fit only visible data range
+            
+        Returns:
+            FitResult object
+            
+        Raises:
+            ValueError: If fit fails or linecuts not shown
+        """
+        if not self._show_linecuts:
+            raise ValueError("Enable linecuts to use fitting")
+        
+        if self._is_stitched:
+            raise ValueError("Fitting not supported for stitched data")
+        
+        # Get current linecut data
+        label, ylabel, transform = self.transforms[self._current_transform]
+        data = self.data_source.get_data()
+        
+        if self._rotate_s21:
+            data = rotate_s21(data)
+        
+        try:
+            zs = transform(data)
+        except Exception:
+            zs = np.abs(data)
+        
+        zs = np.where(np.isinf(zs), np.nan, zs)
+        
+        # Transpose data if interchanged (same as update_plot does)
+        if self._interchanged:
+            zs = zs.T
+        
+        # Always take horizontal linecut at slider_y position
+        # (self.xs and self.ys have already been swapped by interchange)
+        y_idx = int(self.slider_y.value())
+        y_idx = max(0, min(y_idx, zs.shape[0] - 1))
+        
+        x_data = self.xs.copy()
+        y_data = zs[y_idx, :]
+        
+        # Units come from current spec labels (already swapped by interchange)
+        x_label_for_unit = self.data_source.spec.x_label
+        
+        # Filter to visible range if requested
+        if visible_only and self._xlim is not None:
+            x_min, x_max = min(self._xlim), max(self._xlim)
+            mask = (x_data >= x_min) & (x_data <= x_max)
+            x_data = x_data[mask]
+            y_data = y_data[mask]
+        
+        # Remove NaN values
+        valid_mask = ~np.isnan(x_data) & ~np.isnan(y_data)
+        x_data = x_data[valid_mask]
+        y_data = y_data[valid_mask]
+        
+        if len(x_data) < len(FIT_MODELS[model_name]['param_names']):
+            raise ValueError("Not enough data points for fit")
+        
+        # Store data for residuals
+        self._fit_x_data = x_data
+        self._fit_y_data = y_data
+        
+        # Get units from axis labels
+        x_unit = parse_unit(x_label_for_unit)
+        y_unit = parse_unit(ylabel)
+        
+        # Perform fit
+        result = Fitter.fit(x_data, y_data, model_name, initial_guesses, x_unit, y_unit)
+        self._fit_result = result
+        
+        # Redraw to show fit curve
+        self.update_plot()
+        
+        return result
+    
+    def clear_fit(self):
+        """Clear fit results."""
+        self._fit_result = None
+        self._fit_line = None
+        self._fit_x_data = None
+        self._fit_y_data = None
+        self.update_plot()
+    
+    def set_show_fit(self, show: bool):
+        """Set whether to show fit curve."""
+        self._show_fit = show
+        self.update_plot()
+    
+    def set_show_residuals(self, show: bool):
+        """Set whether to show residuals plot."""
+        self._show_residuals = show
+        self.update_plot()
+    
+    def get_fit_result(self) -> Optional[FitResult]:
+        """Get current fit result."""
+        return self._fit_result
+    
+    def _draw_fit_curve(self):
+        """Draw fit curve on the horizontal linecut plot."""
+        if self._fit_result is None or not self._show_fit:
+            return
+        
+        if not self._show_linecuts or self.ax_xcut is None:
+            return
+        
+        model = FIT_MODELS[self._fit_result.model_name]
+        func = model['func']
+        
+        # Generate smooth x values for fit curve within the fitted range
+        x_min, x_max = self._fit_result.x_range
+        x_fit = np.linspace(x_min, x_max, 500)
+        y_fit = func(x_fit, *self._fit_result.params)
+        
+        self.ax_xcut.plot(x_fit, y_fit, 
+                          color=self.settings.fit_color,
+                          linestyle=self.settings.fit_line_style,
+                          linewidth=self.settings.fit_line_width, 
+                          label='Fit', zorder=10)
+
     def set_transform(self, index: int):
         self._current_transform = index
+        self.clear_fit()  # Clear fit on transform change
         self.update_plot()
 
     def update_settings(self, settings: PlotSettings):
@@ -2366,6 +3896,9 @@ class PlotWidget2D(QWidget):
                 all_mins = []
                 all_maxs = []
                 for xs, ys, data in self.data_source.get_all_datasets():
+                    # Apply S21 rotation if enabled
+                    if self._rotate_s21:
+                        data = rotate_s21(data)
                     zs = transform(data)
                     zs = np.where(np.isinf(zs), np.nan, zs)
                     all_mins.append(float(np.nanmin(zs)))
@@ -2373,6 +3906,9 @@ class PlotWidget2D(QWidget):
                 return min(all_mins), max(all_maxs)
             else:
                 data = self.data_source.get_data()
+                # Apply S21 rotation if enabled
+                if self._rotate_s21:
+                    data = rotate_s21(data)
                 zs = transform(data)
                 # Convert Inf to NaN, then use nanmin/nanmax to ignore NaN values
                 zs = np.where(np.isinf(zs), np.nan, zs)
@@ -2394,10 +3930,10 @@ class PlotWidget2D(QWidget):
 
             label, ylabel, transform = self.transforms[self._current_transform]
             
-            # Get slider values if linecuts are shown
-            if self._show_linecuts and self.slider_y is not None:
-                y_idx = int(self.slider_y.val)
-                x_idx = int(self.slider_x.val)
+            # Get slider values if linecuts are shown (Qt sliders)
+            if self._show_linecuts and hasattr(self, 'slider_y'):
+                y_idx = int(self.slider_y.value())
+                x_idx = int(self.slider_x.value())
             else:
                 y_idx = 0
                 x_idx = 0
@@ -2416,13 +3952,39 @@ class PlotWidget2D(QWidget):
                 # Stitched data: plot each dataset with separate pcolormesh calls
                 # First compute global vmin/vmax across all datasets
                 vmin, vmax = self.get_current_data_range()
-                if self.settings.vmin is not None:
-                    vmin = self.settings.vmin
-                if self.settings.vmax is not None:
-                    vmax = self.settings.vmax
+                if not self.settings.autoscale:
+                    # Only use manual settings when autoscale is off
+                    if self.settings.vmin is not None:
+                        vmin = self.settings.vmin
+                    if self.settings.vmax is not None:
+                        vmax = self.settings.vmax
+                
+                # Create norm for stitched data
+                if self.settings.norm_type == 'twoslope':
+                    vcenter = self.settings.norm_vcenter
+                    if vcenter is None:
+                        # Compute median across all datasets
+                        all_data = []
+                        for xs, ys, data in self.data_source.get_all_datasets():
+                            if self._rotate_s21:
+                                data = rotate_s21(data)
+                            try:
+                                all_data.append(transform(data).flatten())
+                            except:
+                                all_data.append(np.abs(data).flatten())
+                        vcenter = np.nanmedian(np.concatenate(all_data))
+                    vcenter = np.clip(vcenter, vmin + 1e-10, vmax - 1e-10)
+                    norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+                elif self.settings.norm_type == 'power':
+                    norm = PowerNorm(gamma=self.settings.norm_gamma, vmin=vmin, vmax=vmax)
+                else:  # linear (default)
+                    norm = Normalize(vmin=vmin, vmax=vmax)
                 
                 pcm = None
                 for xs, ys, data in self.data_source.get_all_datasets():
+                    # Apply S21 rotation if enabled
+                    if self._rotate_s21:
+                        data = rotate_s21(data)
                     try:
                         zs = transform(data)
                     except Exception as e:
@@ -2433,11 +3995,13 @@ class PlotWidget2D(QWidget):
                     zs = np.where(np.isinf(zs), np.nan, zs)
                     
                     pcm = self.ax_2d.pcolormesh(xs, ys, zs,
-                                                 cmap=self.settings.colormap,
-                                                 vmin=vmin, vmax=vmax)
+                                                 cmap=self.settings.colormap, norm=norm)
             else:
                 # Single dataset: original behavior
                 data = self.data_source.get_data()
+                # Apply S21 rotation if enabled
+                if self._rotate_s21:
+                    data = rotate_s21(data)
                 try:
                     zs = transform(data)
                 except Exception as e:
@@ -2456,10 +4020,26 @@ class PlotWidget2D(QWidget):
 
                 # Get color limits
                 vmin, vmax = self.settings.get_clim(zs)
+                
+                # Determine actual vmin/vmax for norm (use data range if autoscale)
+                actual_vmin = vmin if vmin is not None else np.nanmin(zs)
+                actual_vmax = vmax if vmax is not None else np.nanmax(zs)
+                
+                # Create norm based on settings
+                if self.settings.norm_type == 'twoslope':
+                    vcenter = self.settings.norm_vcenter
+                    if vcenter is None:
+                        vcenter = np.nanmedian(zs)
+                    # Ensure vcenter is within vmin/vmax range
+                    vcenter = np.clip(vcenter, actual_vmin + 1e-10, actual_vmax - 1e-10)
+                    norm = TwoSlopeNorm(vmin=actual_vmin, vcenter=vcenter, vmax=actual_vmax)
+                elif self.settings.norm_type == 'power':
+                    norm = PowerNorm(gamma=self.settings.norm_gamma, vmin=actual_vmin, vmax=actual_vmax)
+                else:  # linear (default)
+                    norm = Normalize(vmin=actual_vmin, vmax=actual_vmax)
 
                 pcm = self.ax_2d.pcolormesh(self.xs, self.ys, zs,
-                                             cmap=self.settings.colormap,
-                                             vmin=vmin, vmax=vmax)
+                                             cmap=self.settings.colormap, norm=norm)
             
             # Set axis limits to match data order
             if self._xlim is not None:
@@ -2484,12 +4064,44 @@ class PlotWidget2D(QWidget):
                 else:
                     self.ax_2d.set_ylim(self._full_ylim[0], self._full_ylim[1])
             
+            # Adjust colorbar axes size based on shrink setting (scales both dimensions to maintain aspect ratio)
+            if self._cbar_ax is not None:
+                if self._show_linecuts:
+                    # Horizontal colorbar - align with ax_xcut (top-right plot, directly above colorbar)
+                    xcut_pos = self.ax_xcut.get_position()
+                    orig_left = xcut_pos.x0
+                    orig_width = xcut_pos.x1 - xcut_pos.x0
+                    orig_bottom = 0.45  # Keep y-position as is
+                    orig_height = 0.03
+                    
+                    new_width = orig_width * self.settings.cbar_shrink
+                    new_height = orig_height * self.settings.cbar_shrink
+                    new_left = orig_left + (orig_width - new_width) / 2  # Center horizontally within ax_xcut width
+                    new_bottom = orig_bottom + (orig_height - new_height) / 2  # Center vertically
+                    self._cbar_ax.set_position([new_left, new_bottom, new_width, new_height])
+                else:
+                    # Vertical colorbar on right side
+                    orig_left, orig_bottom = 0.83, 0.15
+                    orig_width, orig_height = 0.03, 0.73
+                    
+                    new_width = orig_width * self.settings.cbar_shrink
+                    new_height = orig_height * self.settings.cbar_shrink
+                    new_left = orig_left + (orig_width - new_width) / 2  # Center horizontally
+                    new_bottom = orig_bottom + (orig_height - new_height) / 2  # Center vertically
+                    self._cbar_ax.set_position([new_left, new_bottom, new_width, new_height])
+            
             # Add colorbar to dedicated axes
             if pcm is not None:
-                self._colorbar = self.figure.colorbar(pcm, cax=self._cbar_ax)
-                # Use custom z_label if set, otherwise use transform label
-                z_label = self.settings.z_label_text if self.settings.z_label_text else ylabel
-                self._cbar_ax.set_ylabel(z_label, fontsize=self.settings.label_size)
+                if self._show_linecuts:
+                    # Horizontal colorbar
+                    self._colorbar = self.figure.colorbar(pcm, cax=self._cbar_ax, orientation='horizontal')
+                    z_label = self.settings.z_label_text if self.settings.z_label_text else ylabel
+                    self._cbar_ax.set_xlabel(z_label, fontsize=self.settings.label_size)
+                else:
+                    # Vertical colorbar
+                    self._colorbar = self.figure.colorbar(pcm, cax=self._cbar_ax, orientation='vertical')
+                    z_label = self.settings.z_label_text if self.settings.z_label_text else ylabel
+                    self._cbar_ax.set_ylabel(z_label, fontsize=self.settings.label_size)
             
             if self._show_linecuts and not self._is_stitched:
                 # Draw cut lines on 2D plot
@@ -2533,7 +4145,13 @@ class PlotWidget2D(QWidget):
                 if zs.ndim > 1 and zs.shape[0] > y_idx:
                     self.ax_xcut.plot(self.xs, zs[y_idx], color=self.settings.line_color,
                                       linewidth=self.settings.line_width, **marker_kwargs)
-                    self.ax_xcut.set_title(f'{y_label} = {self.ys[y_idx]:.3g}', fontsize=10)
+                    # Format title with 3 decimal places in scientific notation
+                    y_val = self.ys[y_idx]
+                    if abs(y_val) >= 1e4 or (abs(y_val) < 1e-2 and y_val != 0):
+                        y_val_str = f'{y_val:.3e}'
+                    else:
+                        y_val_str = f'{y_val:.4g}'
+                    self.ax_xcut.set_title(f'{y_label} = {y_val_str}', fontsize=10)
                 self.ax_xcut.set_xlabel(x_label, fontsize=self.settings.label_size)
                 self.ax_xcut.set_ylabel(ylabel, fontsize=self.settings.label_size)
                 # Apply x zoom/flip to x-cut
@@ -2549,12 +4167,26 @@ class PlotWidget2D(QWidget):
                         self.ax_xcut.set_xlim(self._full_xlim[0], self._full_xlim[1])
                 if self.settings.grid_enabled:
                     self.ax_xcut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
+                # Apply tick settings to linecut
+                self.ax_xcut.tick_params(axis='both', which='major',
+                                         length=self.settings.tick_size,
+                                         width=self.settings.tick_width,
+                                         labelsize=self.settings.tick_font_size)
+                
+                # Draw fit curve on horizontal linecut
+                self._draw_fit_curve()
 
                 # Y cut - shows vertical slice at fixed X value
                 if zs.ndim > 1 and zs.shape[1] > x_idx:
                     self.ax_ycut.plot(self.ys, zs[:, x_idx], color=self.settings.line_color,
                                       linewidth=self.settings.line_width, **marker_kwargs)
-                    self.ax_ycut.set_title(f'{x_label} = {self.xs[x_idx]:.3g}', fontsize=10)
+                    # Format title with 3 decimal places in scientific notation
+                    x_val = self.xs[x_idx]
+                    if abs(x_val) >= 1e4 or (abs(x_val) < 1e-2 and x_val != 0):
+                        x_val_str = f'{x_val:.3e}'
+                    else:
+                        x_val_str = f'{x_val:.4g}'
+                    self.ax_ycut.set_title(f'{x_label} = {x_val_str}', fontsize=10)
                 self.ax_ycut.set_xlabel(y_label, fontsize=self.settings.label_size)
                 self.ax_ycut.set_ylabel(ylabel, fontsize=self.settings.label_size)
                 # Apply y zoom/flip to y-cut
@@ -2570,6 +4202,17 @@ class PlotWidget2D(QWidget):
                         self.ax_ycut.set_xlim(self._full_ylim[0], self._full_ylim[1])
                 if self.settings.grid_enabled:
                     self.ax_ycut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
+                # Apply tick settings to linecut
+                self.ax_ycut.tick_params(axis='both', which='major',
+                                         length=self.settings.tick_size,
+                                         width=self.settings.tick_width,
+                                         labelsize=self.settings.tick_font_size)
+
+            # Draw annotation lines on 2D plot
+            for x_val, color, linestyle, linewidth in self._vlines:
+                self.ax_2d.axvline(x=x_val, color=color, linestyle=linestyle, linewidth=linewidth, alpha=0.8)
+            for y_val, color, linestyle, linewidth in self._hlines:
+                self.ax_2d.axhline(y=y_val, color=color, linestyle=linestyle, linewidth=linewidth, alpha=0.8)
 
             # Draw callout annotations on 2D plot
             for x_val, y_val, z_val in self._callouts:
@@ -2585,7 +4228,45 @@ class PlotWidget2D(QWidget):
                 )
                 ann.draggable()
 
-            self.figure.tight_layout()
+            # Draw delta callout first point marker (while waiting for second click)
+            if self._delta_callout_first_point is not None:
+                x1, y1, z1 = self._delta_callout_first_point
+                self.ax_2d.plot(x1, y1, 'ro', markersize=7, markeredgecolor='darkred', markeredgewidth=2)
+
+            # Draw delta callouts (connecting lines with difference annotation)
+            for (x1, y1, z1), (x2, y2, z2) in self._delta_callouts:
+                # Draw markers at both points
+                self.ax_2d.plot(x1, y1, 'ro', markersize=5)
+                self.ax_2d.plot(x2, y2, 'ro', markersize=5)
+                
+                # Draw connecting line
+                self.ax_2d.plot([x1, x2], [y1, y2], 'r-', linewidth=1.5, alpha=0.7)
+                
+                # Calculate deltas
+                dx = x2 - x1
+                dy = y2 - y1
+                dz = z2 - z1
+                
+                # Create annotation at midpoint
+                mid_x = (x1 + x2) / 2
+                mid_y = (y1 + y2) / 2
+                dz_str = 'NaN' if (np.isnan(z1) or np.isnan(z2)) else f'{dz:.4g}'
+                ann = self.ax_2d.annotate(
+                    f'Δx={dx:.4g}\nΔy={dy:.4g}\nΔz={dz_str}',
+                    xy=(mid_x, mid_y),
+                    xytext=(10, 10), textcoords='offset points',
+                    fontsize=9,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='red', alpha=0.9),
+                    arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='red')
+                )
+                ann.draggable()
+
+            # Apply tight_layout with rect to preserve space for colorbar
+            if self._show_linecuts:
+                self.figure.tight_layout(rect=[0, 0, 1.0, 1.0])
+            else:
+                self.figure.tight_layout(rect=[0, 0, 0.82, 1.0])
+            
             self.canvas.draw()
         except Exception as e:
             print(f"Plot update error: {e}")
@@ -2604,12 +4285,78 @@ class Plotter(QMainWindow):
         self.update_timer: Optional[QTimer] = None
         self.settings = PlotSettings()
         self.sidebar_visible = True
+        self._current_fit_result = None  # Stores current fit result for copy
 
         self._setup_ui()
         self.setAcceptDrops(True)
+        
+        # Setup keyboard shortcuts
+        self._setup_shortcuts()
 
         if file_path:
             self.load_file(file_path)
+
+    def _setup_shortcuts(self):
+        """Setup all keyboard shortcuts."""
+        # Escape - cancel zoom/callout modes
+        self.escape_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self.escape_shortcut.activated.connect(self._on_escape_pressed)
+        
+        # Ctrl+C - Copy to clipboard
+        self.copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
+        self.copy_shortcut.activated.connect(self._copy_to_clipboard)
+        
+        # Ctrl+Shift+C - Copy metadata
+        self.copy_meta_shortcut = QShortcut(QKeySequence("Ctrl+Shift+C"), self)
+        self.copy_meta_shortcut.activated.connect(self._copy_metadata_to_clipboard)
+        
+        # Ctrl+E - Export/Save figure
+        self.export_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
+        self.export_shortcut.activated.connect(self._save_figure)
+        
+        # Ctrl+L - Toggle linecuts
+        self.linecuts_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
+        self.linecuts_shortcut.activated.connect(self._toggle_linecuts_shortcut)
+        
+        # Ctrl+Shift+L - Toggle live update
+        self.live_shortcut = QShortcut(QKeySequence("Ctrl+Shift+L"), self)
+        self.live_shortcut.activated.connect(self._toggle_live_update_shortcut)
+        
+        # Ctrl+R - Toggle rotate S21
+        self.rotate_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.rotate_shortcut.activated.connect(self._toggle_rotate_s21_shortcut)
+        
+        # Ctrl+O - Add callout
+        self.callout_shortcut = QShortcut(QKeySequence("Ctrl+O"), self)
+        self.callout_shortcut.activated.connect(self._on_add_callout)
+        
+        # Ctrl+Shift+O - Add delta callout
+        self.delta_callout_shortcut = QShortcut(QKeySequence("Ctrl+Shift+O"), self)
+        self.delta_callout_shortcut.activated.connect(self._on_add_delta_callout)
+        
+        # Ctrl+T - Import style
+        self.import_style_shortcut = QShortcut(QKeySequence("Ctrl+T"), self)
+        self.import_style_shortcut.activated.connect(self._on_import_style)
+        
+        # Ctrl+Shift+E - Export style
+        self.export_style_shortcut = QShortcut(QKeySequence("Ctrl+Shift+E"), self)
+        self.export_style_shortcut.activated.connect(self._on_export_style)
+
+    def _toggle_linecuts_shortcut(self):
+        """Toggle linecuts via keyboard shortcut."""
+        # Only works for 2D plots - check if plot widget has linecuts capability
+        if self.plot_widget and hasattr(self.plot_widget, '_show_linecuts'):
+            self.sidebar.linecuts_checkbox.setChecked(not self.sidebar.linecuts_checkbox.isChecked())
+
+    def _toggle_live_update_shortcut(self):
+        """Toggle live update via keyboard shortcut."""
+        if hasattr(self.sidebar, 'live_checkbox') and self.sidebar.live_checkbox.isEnabled():
+            self.sidebar.live_checkbox.setChecked(not self.sidebar.live_checkbox.isChecked())
+
+    def _toggle_rotate_s21_shortcut(self):
+        """Toggle rotate S21 via keyboard shortcut."""
+        if hasattr(self.sidebar, 'rotate_s21_checkbox'):
+            self.sidebar.rotate_s21_checkbox.setChecked(not self.sidebar.rotate_s21_checkbox.isChecked())
 
     def _setup_ui(self):
         central = QWidget()
@@ -2637,6 +4384,13 @@ class Plotter(QMainWindow):
         
         top_bar.addStretch()
         
+        # Keyboard shortcuts cheatsheet button
+        self.shortcuts_btn = QPushButton("⌨")
+        self.shortcuts_btn.setFixedSize(32, 32)
+        self.shortcuts_btn.setToolTip("Keyboard Shortcuts")
+        self.shortcuts_btn.clicked.connect(self._show_shortcuts_cheatsheet)
+        top_bar.addWidget(self.shortcuts_btn)
+        
         # Toggle sidebar button (on the right)
         self.toggle_btn = QPushButton("☰")
         self.toggle_btn.setFixedSize(32, 32)
@@ -2647,7 +4401,7 @@ class Plotter(QMainWindow):
         content_layout.addLayout(top_bar)
 
         # Drop zone
-        self.drop_label = QLabel("Drag and drop your HDF5 file here\n\nor double-click an .h5 file")
+        self.drop_label = QLabel("Drag and drop your HDF5 file here")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setStyleSheet(
             "border: 2px dashed #aaa; padding: 40px; font-size: 20px; color: #666;"
@@ -2675,26 +4429,143 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('send_word', self._send_to_word)
         self.sidebar.set_callback('rescale', self._on_rescale)
         self.sidebar.set_callback('linecuts_toggled', self._on_linecuts_toggled)
-        self.sidebar.set_callback('zoom_toggled', self._on_zoom_toggled)
+        self.sidebar.set_callback('start_zoom', self._on_start_zoom)
         self.sidebar.set_callback('reset_zoom', self._on_reset_zoom)
         self.sidebar.set_callback('flip_x', self._on_flip_x)
         self.sidebar.set_callback('flip_y', self._on_flip_y)
         self.sidebar.set_callback('interchange_xy', self._on_interchange_xy)
-        self.sidebar.set_callback('callout_toggled', self._on_callout_toggled)
+        self.sidebar.set_callback('add_callout', self._on_add_callout)
+        self.sidebar.set_callback('add_delta_callout', self._on_add_delta_callout)
         self.sidebar.set_callback('clear_callouts', self._on_clear_callouts)
+        self.sidebar.set_callback('add_vline', self._on_add_vline)
+        self.sidebar.set_callback('add_hline', self._on_add_hline)
+        self.sidebar.set_callback('clear_lines', self._on_clear_lines)
+        self.sidebar.set_callback('rotate_s21_toggled', self._on_rotate_s21_toggled)
         self.sidebar.set_callback('change_figsize', self._on_change_figsize)
         self.sidebar.set_callback('set_limits', self._on_set_limits)
         self.sidebar.set_callback('stitch_files', self._on_stitch_files)
+        self.sidebar.set_callback('import_style', self._on_import_style)
+        self.sidebar.set_callback('export_style', self._on_export_style)
+        # Fitting callbacks
+        self.sidebar.set_callback('fit_visible', self._on_fit_visible)
+        self.sidebar.set_callback('fit_all', self._on_fit_all)
+        self.sidebar.set_callback('fit_clear', self._on_fit_clear)
+        self.sidebar.set_callback('show_fit_toggled', self._on_show_fit_toggled)
+        self.sidebar.set_callback('show_residuals_toggled', self._on_show_residuals_toggled)
+        self.sidebar.set_callback('copy_fit_results', self._on_copy_fit_results)
+        self.sidebar.set_callback('fit_func_changed', self._on_fit_func_changed)
         main_layout.addWidget(self.sidebar)
+
+    def _on_escape_pressed(self):
+        """Handle Escape key - cancel zoom/callout modes."""
+        if self.plot_widget:
+            if hasattr(self.plot_widget, '_zoom_mode') and self.plot_widget._zoom_mode:
+                self.plot_widget.set_zoom_mode(False)
+            if hasattr(self.plot_widget, '_callout_mode') and self.plot_widget._callout_mode:
+                self.plot_widget.set_callout_mode(False)
+            if hasattr(self.plot_widget, '_delta_callout_mode') and self.plot_widget._delta_callout_mode:
+                self.plot_widget.set_delta_callout_mode(False)
 
     def _toggle_sidebar(self):
         self.sidebar_visible = not self.sidebar_visible
         self.sidebar.setVisible(self.sidebar_visible)
 
-    def _on_zoom_toggled(self, enabled: bool):
-        """Toggle zoom mode for plots."""
+    def _show_shortcuts_cheatsheet(self):
+        """Show a modal overlay with keyboard shortcuts cheatsheet."""
+        # Create overlay that covers the entire window
+        self._shortcuts_overlay = QWidget(self)
+        self._shortcuts_overlay.setGeometry(self.rect())
+        self._shortcuts_overlay.setStyleSheet("background-color: rgba(0, 0, 0, 0.5);")
+        
+        # Content card - translucent
+        self._shortcuts_card = QWidget(self._shortcuts_overlay)
+        self._shortcuts_card.setStyleSheet("""
+            QWidget {
+                background-color: rgba(255, 255, 255, 0.85);
+                border-radius: 12px;
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+        """)
+        card_layout = QVBoxLayout(self._shortcuts_card)
+        card_layout.setContentsMargins(24, 20, 24, 20)
+        card_layout.setSpacing(16)
+        
+        # Title
+        title = QLabel("⌨ Keyboard Shortcuts")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #1f2937; background: transparent;")
+        title.setAlignment(Qt.AlignCenter)
+        card_layout.addWidget(title)
+        
+        # Shortcuts list
+        shortcuts = [
+            ("Ctrl + C", "Copy figure to clipboard"),
+            ("Ctrl + Shift + C", "Copy metadata"),
+            ("Ctrl + E", "Export/Save figure"),
+            ("Ctrl + Shift + E", "Export style"),
+            ("Ctrl + T", "Import style"),
+            ("Ctrl + L", "Toggle linecuts (2D only)"),
+            ("Ctrl + Shift + L", "Toggle live update"),
+            ("Ctrl + R", "Toggle rotate S21"),
+            ("Ctrl + O", "Add callout"),
+            ("Ctrl + Shift + O", "Add delta callout"),
+            ("Escape", "Cancel zoom/callout mode"),
+        ]
+        
+        # Create grid layout for shortcuts
+        grid = QFormLayout()
+        grid.setSpacing(10)
+        grid.setHorizontalSpacing(20)
+        for key, description in shortcuts:
+            key_label = QLabel(f"<code style='background: #e5e7eb; padding: 2px 8px; border-radius: 4px;'>{key}</code>")
+            key_label.setStyleSheet("color: #2563eb; font-family: monospace; font-size: 13px; background: transparent;")
+            desc_label = QLabel(description)
+            desc_label.setStyleSheet("color: #4b5563; font-size: 13px; background: transparent;")
+            grid.addRow(key_label, desc_label)
+        
+        card_layout.addLayout(grid)
+        
+        # Size and center the card
+        self._shortcuts_card.adjustSize()
+        self._center_shortcuts_card()
+        
+        # Close on click outside card
+        def on_overlay_click(event):
+            card_rect = self._shortcuts_card.geometry()
+            if not card_rect.contains(event.pos()):
+                self._close_shortcuts_overlay()
+        
+        self._shortcuts_overlay.mousePressEvent = on_overlay_click
+        
+        self._shortcuts_overlay.show()
+        self._shortcuts_overlay.raise_()
+    
+    def _center_shortcuts_card(self):
+        """Center the shortcuts card in the overlay."""
+        if hasattr(self, '_shortcuts_overlay') and self._shortcuts_overlay and hasattr(self, '_shortcuts_card') and self._shortcuts_card:
+            self._shortcuts_overlay.setGeometry(self.rect())
+            self._shortcuts_card.move(
+                (self._shortcuts_overlay.width() - self._shortcuts_card.width()) // 2,
+                (self._shortcuts_overlay.height() - self._shortcuts_card.height()) // 2
+            )
+    
+    def _close_shortcuts_overlay(self):
+        """Close the shortcuts overlay."""
+        if hasattr(self, '_shortcuts_overlay') and self._shortcuts_overlay:
+            self._shortcuts_overlay.close()
+            self._shortcuts_overlay.deleteLater()
+            self._shortcuts_overlay = None
+            self._shortcuts_card = None
+    
+    def resizeEvent(self, event):
+        """Handle window resize."""
+        super().resizeEvent(event)
+        if hasattr(self, '_shortcuts_overlay') and self._shortcuts_overlay:
+            self._center_shortcuts_card()
+
+    def _on_start_zoom(self):
+        """Enable zoom mode for one zoom action."""
         if self.plot_widget and hasattr(self.plot_widget, 'set_zoom_mode'):
-            self.plot_widget.set_zoom_mode(enabled)
+            self.plot_widget.set_zoom_mode(True)
 
     def _on_reset_zoom(self):
         """Reset zoom to full view."""
@@ -2716,15 +4587,206 @@ class Plotter(QMainWindow):
         if self.plot_widget and hasattr(self.plot_widget, 'interchange_xy'):
             self.plot_widget.interchange_xy()
 
-    def _on_callout_toggled(self, enabled: bool):
-        """Toggle callout mode for plots."""
+    def _on_add_callout(self):
+        """Enable callout mode for single callout addition."""
         if self.plot_widget and hasattr(self.plot_widget, 'set_callout_mode'):
-            self.plot_widget.set_callout_mode(enabled)
+            self.plot_widget.set_callout_mode(True)
+            # Set callback to exit callout mode after adding one callout
+            if hasattr(self.plot_widget, 'set_callout_added_callback'):
+                self.plot_widget.set_callout_added_callback(self._on_callout_added)
+
+    def _on_callout_added(self):
+        """Called when a callout is added - exits callout mode."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_callout_mode'):
+            self.plot_widget.set_callout_mode(False)
+
+    def _on_add_delta_callout(self):
+        """Enable delta callout mode for two-point difference annotation."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_delta_callout_mode'):
+            self.plot_widget.set_delta_callout_mode(True)
+            # Set callback to exit delta callout mode after adding one delta callout
+            if hasattr(self.plot_widget, 'set_delta_callout_added_callback'):
+                self.plot_widget.set_delta_callout_added_callback(self._on_delta_callout_added)
+
+    def _on_delta_callout_added(self):
+        """Called when a delta callout is added - exits delta callout mode."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_delta_callout_mode'):
+            self.plot_widget.set_delta_callout_mode(False)
 
     def _on_clear_callouts(self):
         """Clear all callout annotations."""
         if self.plot_widget and hasattr(self.plot_widget, 'clear_callouts'):
             self.plot_widget.clear_callouts()
+
+    def _on_rotate_s21_toggled(self, enabled: bool):
+        """Toggle S21 rotation for data."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_rotate_s21'):
+            self.plot_widget.set_rotate_s21(enabled)
+
+    def _on_add_vline(self):
+        """Open dialog to add a vertical line."""
+        if not self.plot_widget:
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Vertical Line")
+        layout = QVBoxLayout(dialog)
+        
+        form_layout = QFormLayout()
+        
+        # X value - use QLineEdit for scientific notation support
+        value_edit = QLineEdit()
+        value_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        form_layout.addRow("X value:", value_edit)
+        
+        # Color picker
+        color_btn = QPushButton()
+        color_btn.setFixedSize(60, 24)
+        current_color = '#00aa00'  # Default green
+        color_btn.setStyleSheet(f"background-color: {current_color};")
+        color_btn.color = current_color
+        def pick_color():
+            color = QColorDialog.getColor()
+            if color.isValid():
+                color_btn.color = color.name()
+                color_btn.setStyleSheet(f"background-color: {color.name()};")
+        color_btn.clicked.connect(pick_color)
+        form_layout.addRow("Color:", color_btn)
+        
+        # Line style
+        style_combo = QComboBox()
+        line_styles = [
+            ('Solid', '-'),
+            ('Dashed', '--'),
+            ('Dotted', ':'),
+            ('Dash-dot', '-.'),
+        ]
+        for name, _ in line_styles:
+            style_combo.addItem(name)
+        style_combo.setCurrentIndex(1)  # Default to dashed
+        form_layout.addRow("Line style:", style_combo)
+        
+        # Line width
+        width_spin = QDoubleSpinBox()
+        width_spin.setRange(0.5, 10.0)
+        width_spin.setValue(1.5)
+        width_spin.setSingleStep(0.5)
+        form_layout.addRow("Line width:", width_spin)
+        
+        layout.addLayout(form_layout)
+        
+        button_layout = QHBoxLayout()
+        apply_btn = QPushButton("Apply")
+        cancel_btn = QPushButton("Cancel")
+        button_layout.addWidget(apply_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        def on_apply():
+            try:
+                value = float(value_edit.text())
+            except ValueError:
+                QMessageBox.warning(dialog, "Invalid Input", "Please enter a valid number (e.g., 5e9 or 0.001)")
+                return
+            
+            if hasattr(self.plot_widget, 'add_vline'):
+                _, linestyle = line_styles[style_combo.currentIndex()]
+                self.plot_widget.add_vline(
+                    value,
+                    color=color_btn.color,
+                    linestyle=linestyle,
+                    linewidth=width_spin.value()
+                )
+            dialog.accept()
+        
+        apply_btn.clicked.connect(on_apply)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec_()
+
+    def _on_add_hline(self):
+        """Open dialog to add a horizontal line."""
+        if not self.plot_widget:
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Horizontal Line")
+        layout = QVBoxLayout(dialog)
+        
+        form_layout = QFormLayout()
+        
+        # Y value - use QLineEdit for scientific notation support
+        value_edit = QLineEdit()
+        value_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        form_layout.addRow("Y value:", value_edit)
+        
+        # Color picker
+        color_btn = QPushButton()
+        color_btn.setFixedSize(60, 24)
+        current_color = '#0000ff'  # Default blue
+        color_btn.setStyleSheet(f"background-color: {current_color};")
+        color_btn.color = current_color
+        def pick_color():
+            color = QColorDialog.getColor()
+            if color.isValid():
+                color_btn.color = color.name()
+                color_btn.setStyleSheet(f"background-color: {color.name()};")
+        color_btn.clicked.connect(pick_color)
+        form_layout.addRow("Color:", color_btn)
+        
+        # Line style
+        style_combo = QComboBox()
+        line_styles = [
+            ('Solid', '-'),
+            ('Dashed', '--'),
+            ('Dotted', ':'),
+            ('Dash-dot', '-.'),
+        ]
+        for name, _ in line_styles:
+            style_combo.addItem(name)
+        style_combo.setCurrentIndex(1)  # Default to dashed
+        form_layout.addRow("Line style:", style_combo)
+        
+        # Line width
+        width_spin = QDoubleSpinBox()
+        width_spin.setRange(0.5, 10.0)
+        width_spin.setValue(1.5)
+        width_spin.setSingleStep(0.5)
+        form_layout.addRow("Line width:", width_spin)
+        
+        layout.addLayout(form_layout)
+        
+        button_layout = QHBoxLayout()
+        apply_btn = QPushButton("Apply")
+        cancel_btn = QPushButton("Cancel")
+        button_layout.addWidget(apply_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        def on_apply():
+            try:
+                value = float(value_edit.text())
+            except ValueError:
+                QMessageBox.warning(dialog, "Invalid Input", "Please enter a valid number (e.g., 5e9 or 0.001)")
+                return
+            
+            if hasattr(self.plot_widget, 'add_hline'):
+                _, linestyle = line_styles[style_combo.currentIndex()]
+                self.plot_widget.add_hline(
+                    value,
+                    color=color_btn.color,
+                    linestyle=linestyle,
+                    linewidth=width_spin.value()
+                )
+            dialog.accept()
+        
+        apply_btn.clicked.connect(on_apply)
+        cancel_btn.clicked.connect(dialog.reject)
+        dialog.exec_()
+
+    def _on_clear_lines(self):
+        """Clear all annotation lines."""
+        if self.plot_widget and hasattr(self.plot_widget, 'clear_lines'):
+            self.plot_widget.clear_lines()
 
     def _on_change_figsize(self):
         """Open dialog to change figure size."""
@@ -2765,6 +4827,8 @@ class Plotter(QMainWindow):
         if dialog.exec_() == QDialog.Accepted:
             new_width = width_spin.value()
             new_height = height_spin.value()
+            self.settings.fig_width = new_width
+            self.settings.fig_height = new_height
             self.plot_widget.figure.set_size_inches(new_width, new_height)
             self.plot_widget.figure.tight_layout()
             self.plot_widget.update_plot()
@@ -2786,36 +4850,28 @@ class Plotter(QMainWindow):
         # X limits section
         layout.addRow(QLabel("<b>X-Axis Limits</b>"))
         
-        xmin_spin = QDoubleSpinBox()
-        xmin_spin.setRange(-1e12, 1e12)
-        xmin_spin.setDecimals(6)
-        xmin_spin.setValue(min(current_xlim))
-        xmin_spin.setSingleStep(0.1)
-        layout.addRow("X Min:", xmin_spin)
+        xmin_edit = QLineEdit()
+        xmin_edit.setText(f"{min(current_xlim):.6g}")
+        xmin_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        layout.addRow("X Min:", xmin_edit)
         
-        xmax_spin = QDoubleSpinBox()
-        xmax_spin.setRange(-1e12, 1e12)
-        xmax_spin.setDecimals(6)
-        xmax_spin.setValue(max(current_xlim))
-        xmax_spin.setSingleStep(0.1)
-        layout.addRow("X Max:", xmax_spin)
+        xmax_edit = QLineEdit()
+        xmax_edit.setText(f"{max(current_xlim):.6g}")
+        xmax_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        layout.addRow("X Max:", xmax_edit)
         
         # Y limits section
         layout.addRow(QLabel("<b>Y-Axis Limits</b>"))
         
-        ymin_spin = QDoubleSpinBox()
-        ymin_spin.setRange(-1e12, 1e12)
-        ymin_spin.setDecimals(6)
-        ymin_spin.setValue(min(current_ylim))
-        ymin_spin.setSingleStep(0.1)
-        layout.addRow("Y Min:", ymin_spin)
+        ymin_edit = QLineEdit()
+        ymin_edit.setText(f"{min(current_ylim):.6g}")
+        ymin_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        layout.addRow("Y Min:", ymin_edit)
         
-        ymax_spin = QDoubleSpinBox()
-        ymax_spin.setRange(-1e12, 1e12)
-        ymax_spin.setDecimals(6)
-        ymax_spin.setValue(max(current_ylim))
-        ymax_spin.setSingleStep(0.1)
-        layout.addRow("Y Max:", ymax_spin)
+        ymax_edit = QLineEdit()
+        ymax_edit.setText(f"{max(current_ylim):.6g}")
+        ymax_edit.setPlaceholderText("e.g., 5e9 or 0.001")
+        layout.addRow("Y Max:", ymax_edit)
         
         # Buttons
         buttons = QHBoxLayout()
@@ -2839,10 +4895,14 @@ class Plotter(QMainWindow):
         reset_btn.clicked.connect(reset_limits)
         
         if dialog.exec_() == QDialog.Accepted:
-            new_xmin = xmin_spin.value()
-            new_xmax = xmax_spin.value()
-            new_ymin = ymin_spin.value()
-            new_ymax = ymax_spin.value()
+            try:
+                new_xmin = float(xmin_edit.text())
+                new_xmax = float(xmax_edit.text())
+                new_ymin = float(ymin_edit.text())
+                new_ymax = float(ymax_edit.text())
+            except ValueError:
+                QMessageBox.warning(dialog, "Invalid Input", "Please enter valid numbers (e.g., 5e9 or 0.001)")
+                return
             
             # Ensure min < max
             if new_xmin >= new_xmax:
@@ -2870,6 +4930,253 @@ class Plotter(QMainWindow):
         
         if dialog.exec_() == QDialog.Accepted and dialog.stitch_files:
             self._perform_stitch(dialog.stitch_files, dialog.detected_spec)
+
+    def _on_export_style(self):
+        """Export appearance settings to JSON file."""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Style", "", "JSON Files (*.json)")
+        
+        if not file_path:
+            return
+        
+        if not file_path.endswith('.json'):
+            file_path += '.json'
+        
+        style_data = {
+            "colormap": self.settings.colormap,
+            "normalization": {
+                "type": self.settings.norm_type,
+                "gamma": self.settings.norm_gamma,
+                "vcenter": self.settings.norm_vcenter
+            },
+            "line": {
+                "color": self.settings.line_color,
+                "width": self.settings.line_width
+            },
+            "marker": {
+                "style": self.settings.marker_style,
+                "size": self.settings.marker_size,
+                "color": self.settings.marker_color
+            },
+            "grid": {
+                "enabled": self.settings.grid_enabled,
+                "alpha": self.settings.grid_alpha,
+                "width": self.settings.grid_width
+            },
+            "ticks": {
+                "size": self.settings.tick_size,
+                "width": self.settings.tick_width,
+                "font_size": self.settings.tick_font_size,
+                "x_count": self.settings.x_tick_count,
+                "y_count": self.settings.y_tick_count
+            },
+            "labels": {
+                "size": self.settings.label_size
+            },
+            "title": {
+                "size": self.settings.title_size
+            },
+            "colorbar_shrink": self.settings.cbar_shrink,
+            "y_padding": self.settings.y_padding,
+            "figure_size": {
+                "width": self.settings.fig_width,
+                "height": self.settings.fig_height
+            }
+        }
+        
+        try:
+            with open(file_path, 'w') as f:
+                json.dump(style_data, f, indent=2)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export style:\n{e}")
+
+    def _on_import_style(self):
+        """Import appearance settings from JSON file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Style", "", "JSON Files (*.json)")
+        
+        if not file_path:
+            return
+        
+        try:
+            with open(file_path, 'r') as f:
+                style_data = json.load(f)
+            
+            # Apply settings
+            if 'colormap' in style_data:
+                self.settings.colormap = style_data['colormap']
+                idx = self.sidebar.cmap_combo.findText(style_data['colormap'])
+                if idx >= 0:
+                    self.sidebar.cmap_combo.setCurrentIndex(idx)
+            
+            if 'normalization' in style_data:
+                norm = style_data['normalization']
+                self.settings.norm_type = norm.get('type', 'linear')
+                self.settings.norm_gamma = norm.get('gamma', 0.5)
+                self.settings.norm_vcenter = norm.get('vcenter', None)
+                # Update UI
+                norm_map = {'linear': 'Linear', 'twoslope': 'Two Slope', 'power': 'Power'}
+                norm_text = norm_map.get(self.settings.norm_type, 'Linear')
+                idx = self.sidebar.norm_combo.findText(norm_text)
+                if idx >= 0:
+                    self.sidebar.norm_combo.setCurrentIndex(idx)
+                self.sidebar.gamma_spin.setValue(self.settings.norm_gamma)
+                if self.settings.norm_vcenter is not None:
+                    self.sidebar.vcenter_edit.setText(str(self.settings.norm_vcenter))
+                else:
+                    self.sidebar.vcenter_edit.setText('')
+            
+            if 'line' in style_data:
+                line = style_data['line']
+                self.settings.line_color = line.get('color', '#1f77b4')
+                self.settings.line_width = line.get('width', 1.5)
+                self.sidebar.linewidth_spin.setValue(self.settings.line_width)
+            
+            if 'marker' in style_data:
+                marker = style_data['marker']
+                self.settings.marker_style = marker.get('style', 'None')
+                self.settings.marker_size = marker.get('size', 4.0)
+                self.settings.marker_color = marker.get('color', '#1f77b4')
+                idx = self.sidebar.marker_combo.findText(self.settings.marker_style)
+                if idx >= 0:
+                    self.sidebar.marker_combo.setCurrentIndex(idx)
+                self.sidebar.markersize_spin.setValue(self.settings.marker_size)
+            
+            if 'grid' in style_data:
+                grid = style_data['grid']
+                self.settings.grid_enabled = grid.get('enabled', True)
+                self.settings.grid_alpha = grid.get('alpha', 0.3)
+                self.settings.grid_width = grid.get('width', 0.5)
+                self.sidebar.grid_checkbox.setChecked(self.settings.grid_enabled)
+                self.sidebar.grid_width_spin.setValue(self.settings.grid_width)
+            
+            if 'ticks' in style_data:
+                ticks = style_data['ticks']
+                self.settings.tick_size = ticks.get('size', 6.0)
+                self.settings.tick_width = ticks.get('width', 1.0)
+                self.settings.tick_font_size = ticks.get('font_size', 10.0)
+                self.settings.x_tick_count = ticks.get('x_count', 0)
+                self.settings.y_tick_count = ticks.get('y_count', 0)
+                self.sidebar.tick_size_spin.setValue(self.settings.tick_size)
+                self.sidebar.tick_width_spin.setValue(self.settings.tick_width)
+                self.sidebar.tick_font_spin.setValue(self.settings.tick_font_size)
+                self.sidebar.x_tick_spin.setValue(self.settings.x_tick_count)
+                self.sidebar.y_tick_spin.setValue(self.settings.y_tick_count)
+            
+            if 'labels' in style_data:
+                labels = style_data['labels']
+                self.settings.label_size = labels.get('size', 12.0)
+                self.sidebar.label_size_spin.setValue(self.settings.label_size)
+            
+            if 'title' in style_data:
+                title = style_data['title']
+                self.settings.title_size = title.get('size', 14.0)
+                self.sidebar.title_size_spin.setValue(self.settings.title_size)
+            
+            if 'colorbar_shrink' in style_data:
+                self.settings.cbar_shrink = style_data['colorbar_shrink']
+                self.sidebar.cbar_shrink_spin.setValue(self.settings.cbar_shrink)
+            
+            if 'y_padding' in style_data:
+                self.settings.y_padding = style_data['y_padding']
+            
+            if 'figure_size' in style_data:
+                fig_size = style_data['figure_size']
+                self.settings.fig_width = fig_size.get('width', 10.0)
+                self.settings.fig_height = fig_size.get('height', 8.0)
+                if self.plot_widget:
+                    self.plot_widget.figure.set_size_inches(
+                        self.settings.fig_width, self.settings.fig_height)
+                    self.plot_widget.figure.tight_layout()
+            
+            # Apply settings to plot
+            if self.plot_widget:
+                self.plot_widget.update_settings(self.settings)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import style:\n{e}")
+
+    # --- Fitting Methods ---
+    
+    def _on_fit_visible(self):
+        """Fit data within visible range."""
+        self._perform_fit(visible_only=True)
+    
+    def _on_fit_all(self):
+        """Fit all data."""
+        self._perform_fit(visible_only=False)
+    
+    def _perform_fit(self, visible_only: bool):
+        """Perform the fit operation."""
+        if not self.plot_widget:
+            return
+        
+        # Get selected model and guesses
+        model_name = self.sidebar.fit_func_combo.currentText()
+        guesses = self.sidebar.get_fit_guesses()
+        
+        try:
+            result = self.plot_widget.fit_data(model_name, guesses, visible_only)
+            self.sidebar.show_fit_results(result)
+            # Store result for copy
+            self._current_fit_result = result
+        except ValueError as e:
+            self.sidebar.show_fit_error(str(e))
+            self._current_fit_result = None
+    
+    def _on_fit_clear(self):
+        """Clear fit results."""
+        if self.plot_widget:
+            self.plot_widget.clear_fit()
+        self.sidebar.clear_fit_display()
+        self._current_fit_result = None
+    
+    def _on_show_fit_toggled(self, show: bool):
+        """Toggle fit curve visibility."""
+        if self.plot_widget:
+            self.plot_widget.set_show_fit(show)
+    
+    def _on_show_residuals_toggled(self, show: bool):
+        """Toggle residuals plot visibility."""
+        if self.plot_widget:
+            self.plot_widget.set_show_residuals(show)
+    
+    def _on_fit_func_changed(self, func_name: str):
+        """Handle fit function selection change."""
+        # Clear current fit when function changes
+        self._on_fit_clear()
+    
+    def _on_copy_fit_results(self):
+        """Copy fit results to clipboard."""
+        if not hasattr(self, '_current_fit_result') or self._current_fit_result is None:
+            return
+        
+        result = self._current_fit_result
+        
+        # Build human-readable text
+        lines = [f"{result.model_name} Fit Results:", ""]
+        
+        for name, value, error, unit in zip(
+                result.param_names, result.params, result.errors, result.param_units):
+            unit_str = f" {unit}" if unit else ""
+            lines.append(f"  {name} = {value:.6g} ± {error:.2g}{unit_str}")
+        
+        # Add extra results
+        if result.extra_results:
+            lines.append("")
+            for name, (value, error, unit) in result.extra_results.items():
+                unit_str = f" {unit}" if unit else ""
+                lines.append(f"  {name} = {value:.6g} ± {error:.2g}{unit_str}")
+        
+        lines.append("")
+        lines.append(f"  R² = {result.r_squared:.6f}")
+        lines.append("")
+        lines.append(f"Fit range: {result.x_range[0]:.6g} to {result.x_range[1]:.6g}")
+        
+        text = "\n".join(lines)
+        
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
     
     def _perform_stitch(self, stitch_files: List[str], spec: ExperimentSpec):
         """Combine data from multiple files using multiple pcolormesh calls."""
@@ -2955,6 +5262,15 @@ class Plotter(QMainWindow):
         """Toggle linecut display for 2D plots."""
         if self.plot_widget and hasattr(self.plot_widget, 'set_show_linecuts'):
             self.plot_widget.set_show_linecuts(show)
+            # Enable/disable fitting based on linecuts state
+            # Only if live update is not active
+            if not self.sidebar.live_checkbox.isChecked():
+                self.sidebar.set_fit_enabled(show)
+                if not show:
+                    self.sidebar.fit_visible_btn.setToolTip("Enable linecuts to use fitting")
+                    self.sidebar.fit_all_btn.setToolTip("Enable linecuts to use fitting")
+                    # Clear any existing fit
+                    self._on_fit_clear()
 
     def _on_rescale(self):
         """Reset color scale to current data range."""
@@ -2969,12 +5285,21 @@ class Plotter(QMainWindow):
     def _on_transform_changed(self, index: int):
         if self.plot_widget:
             self.plot_widget.set_transform(index)
+            # Clear fit display (widget already clears fit internally)
+            self.sidebar.clear_fit_display()
+            self._current_fit_result = None
 
     def _on_live_toggle(self, enabled: bool):
         if enabled and self.update_timer:
             self.update_timer.start(self.sidebar.interval_spin.value())
+            # Disable fitting during live update
+            self.sidebar.set_fit_enabled(False)
+            # Clear any existing fit
+            self._on_fit_clear()
         elif self.update_timer:
             self.update_timer.stop()
+            # Re-enable fitting
+            self.sidebar.set_fit_enabled(True)
 
     def _on_interval_changed(self, interval: int):
         if self.update_timer and self.sidebar.live_checkbox.isChecked():
@@ -3101,14 +5426,16 @@ class Plotter(QMainWindow):
                 spec = detected_spec
 
             temp_file.close()
-            self._setup_plot(file_path, spec)
+            # Only resize on first load (when no plot exists yet)
+            first_load = self.plot_widget is None
+            self._setup_plot(file_path, spec, first_load=first_load)
 
         except Exception as e:
             tb = traceback.format_exc()
             self.drop_label.setText(f"Error loading file:\n{e}\n\n{tb}")
             self.drop_label.show()
 
-    def _setup_plot(self, file_path: str, spec: ExperimentSpec):
+    def _setup_plot(self, file_path: str, spec: ExperimentSpec, first_load: bool = False):
         if self.data_source:
             self.data_source.close()
         if self.update_timer:
@@ -3131,13 +5458,20 @@ class Plotter(QMainWindow):
 
         if is_2d:
             self.plot_widget = PlotWidget2D(self.data_source, transforms, self.settings)
-            self.resize(1600, 900)
+            if first_load:
+                self.resize(1600, 900)
             # Initialize scale range from data
             vmin, vmax = self.plot_widget.get_current_data_range()
             self.sidebar.update_scale_range(vmin, vmax)
         else:
             self.plot_widget = PlotWidget1D(self.data_source, transforms, self.settings)
-            self.resize(1200, 600)
+            if first_load:
+                self.resize(1200, 600)
+
+        # Sync settings with actual figure size
+        fig_size = self.plot_widget.figure.get_size_inches()
+        self.settings.fig_width = fig_size[0]
+        self.settings.fig_height = fig_size[1]
 
         # Set up zoom completed callback to uncheck the zoom button
         self.plot_widget.set_zoom_completed_callback(self._on_zoom_completed)
@@ -3148,6 +5482,10 @@ class Plotter(QMainWindow):
         self.sidebar.set_metadata(self.data_source.metadata_str)
         self.sidebar.set_2d_mode(is_2d)
         
+        # Clear fit display (new file loaded)
+        self.sidebar.clear_fit_display()
+        self._current_fit_result = None
+        
         # Re-enable live updates (may have been disabled by stitched data)
         self.sidebar.live_checkbox.setEnabled(True)
         self.sidebar.live_checkbox.setToolTip("")
@@ -3155,14 +5493,25 @@ class Plotter(QMainWindow):
         # Re-enable linecuts (may have been disabled by stitched data)
         self.sidebar.linecuts_checkbox.setEnabled(True)
         self.sidebar.linecuts_checkbox.setToolTip("")
+        
+        # Set z-label (colorbar/y-axis data label) from spec if provided
+        if spec.data_label:
+            self.sidebar.z_label_edit.setText(spec.data_label)
+            self.settings.z_label_text = spec.data_label
+            # For 1D plots, also set y_label_text (the data axis)
+            if not is_2d:
+                self.settings.y_label_text = spec.data_label
+        else:
+            self.sidebar.z_label_edit.setText("")
+            self.settings.z_label_text = ""
 
         self.plot_container.addWidget(self.plot_widget)
         self.plot_widget.update_plot()
         self._start_live_updates()
 
     def _on_zoom_completed(self):
-        """Called when zoom is completed to uncheck the zoom button."""
-        self.sidebar.zoom_btn.setChecked(False)
+        """Called when zoom is completed - zoom mode already exited in PlotWidget."""
+        pass  # Zoom mode is already disabled by PlotWidget
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
