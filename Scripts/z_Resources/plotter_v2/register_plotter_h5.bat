@@ -28,10 +28,6 @@ reg add "HKEY_CLASSES_ROOT\HDF5.DataFile" /ve /d "HDF5 Data File" /f >nul
 reg add "HKEY_CLASSES_ROOT\HDF5.DataFile\shell\open\command" /ve /d "\"%PYTHONW%\" \"%PLOTTER%\" \"%%1\"" /f >nul
 reg add "HKEY_CLASSES_ROOT\HDF5.DataFile\DefaultIcon" /ve /d "%ICON%" /f >nul
 
-echo Refreshing Explorer...
-taskkill /f /im explorer.exe >nul 2>&1
-start explorer.exe
-
 echo.
 echo Done! Double-click a .h5 file to test.
 pause
