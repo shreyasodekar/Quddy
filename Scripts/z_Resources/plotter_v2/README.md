@@ -4,17 +4,18 @@ A PyQt5-based interactive viewer for HDF5 data files, designed for experimental 
 
 ## Features
 
-- **Drag & Drop** – Open .h5 files by dragging onto the window
-- **Live Updates** – Auto-refresh plots from actively running experiments
-- **1D & 2D Plots** – Auto-detects experiment type and displays appropriate plot. If Auto-detect fails, requires manual axes configuration.
-- **In-plotter fitting** – Basic fitting functions (Linear, Lorentzian, Double Lorentzian, Exponential decay, Exponentially decaying sinusoidal). For fitting of resonator traces in polar mode, this amazing package [Resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan) is used.
-- **Linecuts** – Interactive sliders for horizontal/vertical cuts through 2D data
-- **Transforms** – Built-in transforms (Magnitude, Phase, Real, Imag, dB, etc.) + Polar plots of complex data.
-- **Color Normalization** – Linear, Power, and Two-Slope normalization
-- **Stitch Files** – Combine multiple HDF5 files into a single view
-- **Annotations** – Add callouts to plots
-- **Export** – Save figures as PNG/PDF/SVG, copy to clipboard, copy experiment metadata
-- **Style Import/Export** – Save and load appearance settings as JSON
+- **Drag & Drop** - Open .h5 files by dragging onto the window
+- **Live Updates** - Auto-refresh plots from actively running experiments
+- **1D & 2D Plots** - Auto-detects experiment type and displays appropriate plot. If Auto-detect fails, requires manual axes configuration.
+- **In-plotter fitting** - Basic fitting functions (Linear, Lorentzian, Double Lorentzian, Exponential decay, Exponentially decaying sinusoidal). For fitting of resonator traces in polar mode, this amazing package [Resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan) is used.
+- **Linecuts** - Interactive sliders for horizontal/vertical cuts through 2D data
+- **Stitch and Overlay** - Stitch and Overlay multiple plots in a figure.
+- **Transforms** - Built-in transforms (Magnitude, Phase, Real, Imag, dB, etc.) + Polar plots of complex data.
+- **Color Normalization** - Linear, Power, and Two-Slope normalization
+- **Stitch Files** - Combine multiple HDF5 files into a single view
+- **Annotations** - Add callouts to plots
+- **Export** - Save figures as PNG/PDF/SVG, copy to clipboard, copy experiment metadata
+- **Style Import/Export** - Save and load appearance settings as JSON
 
 ## Usage (Works best alongside Quddy!)
 

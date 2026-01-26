@@ -51,6 +51,54 @@ except ImportError:
     HAS_RESONATOR = False
 
 
+class DroppableGroupBox(QGroupBox):
+    """QGroupBox that accepts file drops."""
+    
+    def __init__(self, title: str, parent=None):
+        super().__init__(title, parent)
+        self.setAcceptDrops(True)
+        self._drop_callback = None
+        self._normal_style = ""
+        self._highlight_style = ""
+    
+    def set_drop_callback(self, callback):
+        """Set callback for when files are dropped. Callback receives list of file paths."""
+        self._drop_callback = callback
+    
+    def set_styles(self, normal: str, highlight: str):
+        """Set normal and drag-highlight styles."""
+        self._normal_style = normal
+        self._highlight_style = highlight
+        self.setStyleSheet(normal)
+    
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            # Check if any URL is an h5 file
+            for url in event.mimeData().urls():
+                if url.toLocalFile().endswith(('.h5', '.hdf5')):
+                    event.acceptProposedAction()
+                    self.setStyleSheet(self._highlight_style)
+                    return
+        event.ignore()
+    
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet(self._normal_style)
+    
+    def dropEvent(self, event):
+        self.setStyleSheet(self._normal_style)
+        if event.mimeData().hasUrls() and self._drop_callback:
+            file_paths = []
+            for url in event.mimeData().urls():
+                file_path = url.toLocalFile()
+                if file_path.endswith(('.h5', '.hdf5')):
+                    file_paths.append(file_path)
+            if file_paths:
+                event.acceptProposedAction()
+                self._drop_callback(file_paths)
+                return
+        event.ignore()
+
+
 class ExperimentType(Enum):
     CW_1D = auto()
     CW_2D = auto()
@@ -129,6 +177,33 @@ class PlotSettings:
         if vmin >= vmax:
             vmin, vmax = np.nanmin(data), np.nanmax(data)
         return vmin, vmax
+
+
+@dataclass
+class OverlayData:
+    """Data for an overlay trace."""
+    xs: np.ndarray              # x-coordinates
+    data: np.ndarray            # Raw complex S21 data
+    ys: Optional[np.ndarray]    # For 2D overlays (None for 1D)
+    label: str                  # Display name (filename by default)
+    color: str                  # Line color
+    visible: bool               # Show/hide toggle
+    source_path: str            # Original file path
+    x_label: str                # Axis label from original file
+    is_2d: bool = False         # Whether overlay is 2D data
+
+
+# Colors for auto-assigning to overlays
+OVERLAY_COLORS = [
+    '#e41a1c',  # red
+    '#377eb8',  # blue  
+    '#4daf4a',  # green
+    '#984ea3',  # purple
+    '#ff7f00',  # orange
+    '#a65628',  # brown
+    '#f781bf',  # pink
+    '#999999',  # gray
+]
 
 
 # Registry of experiment types
@@ -605,16 +680,141 @@ class Sidebar(QWidget):
         data_section.add_layout(interval_layout)
 
         # Stitch files button
-        self.stitch_btn = QPushButton("📎 Stitch Files...")
+        # Stitch and Overlay buttons side by side
+        stitch_overlay_layout = QHBoxLayout()
+        self.stitch_btn = QPushButton("📎 Stitch")
         self.stitch_btn.setToolTip("Combine multiple HDF5 files of the same experiment type")
         self.stitch_btn.clicked.connect(lambda: self._emit('stitch_files'))
-        data_section.add_widget(self.stitch_btn)
+        stitch_overlay_layout.addWidget(self.stitch_btn)
+        
+        self.overlay_btn = QPushButton("📊 Overlay")
+        self.overlay_btn.setToolTip("Add overlay trace from another file (Shift+Drop also works)")
+        self.overlay_btn.clicked.connect(lambda: self._emit('add_overlay'))
+        stitch_overlay_layout.addWidget(self.overlay_btn)
+        data_section.add_layout(stitch_overlay_layout)
+        
+        # Overlay list manager (hidden by default, shown when overlays exist)
+        self.overlay_container = QGroupBox("Overlays")
+        self.overlay_container.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid #aaa;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background-color: rgba(0, 0, 0, 0.03);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+        """)
+        overlay_container_layout = QVBoxLayout(self.overlay_container)
+        overlay_container_layout.setContentsMargins(6, 6, 6, 6)
+        overlay_container_layout.setSpacing(2)
+        
+        # List widget for overlays
+        self.overlay_list_widget = QWidget()
+        self.overlay_list_widget.setAttribute(Qt.WA_TranslucentBackground)
+        self.overlay_list_layout = QVBoxLayout(self.overlay_list_widget)
+        self.overlay_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.overlay_list_layout.setSpacing(2)
+        overlay_container_layout.addWidget(self.overlay_list_widget)
+        
+        # Clear all button
+        self.clear_overlays_btn = QPushButton("Clear All")
+        self.clear_overlays_btn.setFixedHeight(24)
+        self.clear_overlays_btn.clicked.connect(lambda: self._emit('clear_overlays'))
+        overlay_container_layout.addWidget(self.clear_overlays_btn)
+        
+        self.overlay_container.hide()  # Hidden by default
+        data_section.add_widget(self.overlay_container)
+        
+        # Stitch list manager (hidden by default, shown when files are stitched)
+        self._stitch_groupbox_normal_style = """
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid #aaa;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background-color: rgba(0, 0, 0, 0.03);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+        """
+        self._stitch_groupbox_highlight_style = """
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                border: 2px solid #4a90d9;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background-color: rgba(74, 144, 217, 0.1);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+        """
+        self.stitch_container = DroppableGroupBox("Stitched Files")
+        self.stitch_container.set_styles(
+            self._stitch_groupbox_normal_style,
+            self._stitch_groupbox_highlight_style
+        )
+        stitch_container_layout = QVBoxLayout(self.stitch_container)
+        stitch_container_layout.setContentsMargins(6, 6, 6, 6)
+        stitch_container_layout.setSpacing(2)
+        
+        # List widget for stitched files
+        self.stitch_list_widget = QWidget()
+        self.stitch_list_widget.setAttribute(Qt.WA_TranslucentBackground)
+        self.stitch_list_layout = QVBoxLayout(self.stitch_list_widget)
+        self.stitch_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.stitch_list_layout.setSpacing(2)
+        stitch_container_layout.addWidget(self.stitch_list_widget)
+        
+        # Clear all button
+        self.clear_stitch_btn = QPushButton("Clear All")
+        self.clear_stitch_btn.setFixedHeight(24)
+        self.clear_stitch_btn.clicked.connect(lambda: self._emit('clear_stitch'))
+        stitch_container_layout.addWidget(self.clear_stitch_btn)
+        
+        self.stitch_container.hide()  # Hidden by default
+        data_section.add_widget(self.stitch_container)
         
         # Argand mode checkbox
         self.argand_checkbox = QCheckBox("Argand (Complex Plane)")
         self.argand_checkbox.setToolTip("Plot Re[S21] vs Im[S21] - useful for resonator visualization")
         self.argand_checkbox.toggled.connect(lambda c: self._emit('argand_toggled', c))
         data_section.add_widget(self.argand_checkbox)
+        
+        # Derivative mode controls
+        deriv_layout = QHBoxLayout()
+        self.derivative_checkbox = QCheckBox("Derivative")
+        self.derivative_checkbox.setToolTip("Plot derivative of data with respect to x-axis")
+        self.derivative_checkbox.toggled.connect(lambda c: self._emit('derivative_toggled', c))
+        deriv_layout.addWidget(self.derivative_checkbox)
+        
+        deriv_layout.addWidget(QLabel("Smooth:"))
+        self.derivative_smoothing_spin = QSpinBox()
+        self.derivative_smoothing_spin.setRange(0, 101)
+        self.derivative_smoothing_spin.setSingleStep(2)  # Odd numbers work best for Savitzky-Golay
+        self.derivative_smoothing_spin.setValue(0)
+        self.derivative_smoothing_spin.setToolTip("Smoothing window (0=none, odd values recommended)")
+        self.derivative_smoothing_spin.valueChanged.connect(lambda v: self._emit('derivative_smoothing_changed', v))
+        self.derivative_smoothing_spin.setFixedWidth(60)
+        deriv_layout.addWidget(self.derivative_smoothing_spin)
+        deriv_layout.addStretch()
+        data_section.add_layout(deriv_layout)
 
         self.scroll_layout.addWidget(data_section)
 
@@ -1505,6 +1705,151 @@ class Sidebar(QWidget):
         self.fit_color_button.hide()
         self.fit_style_container.hide()
     
+    def add_overlay_row(self, index: int, label: str, color: str):
+        """Add a row to the overlay list for managing an overlay."""
+        row_widget = QWidget()
+        row_widget.setProperty('overlay_index', index)
+        row_widget.setAttribute(Qt.WA_TranslucentBackground)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        
+        # Visibility checkbox with label (truncated filename - prioritize ending)
+        display_label = label if len(label) <= 20 else "..." + label[-17:]
+        visible_cb = QCheckBox(display_label)
+        visible_cb.setChecked(True)
+        visible_cb.setToolTip(label)  # Full filename in tooltip
+        visible_cb.toggled.connect(lambda checked, idx=index: self._emit('overlay_visibility_changed', idx, checked))
+        row_layout.addWidget(visible_cb, 1)
+        
+        # Color button
+        color_btn = QPushButton()
+        color_btn.setFixedSize(20, 20)
+        color_btn.setStyleSheet(f"background-color: {color}; border: 1px solid #888;")
+        color_btn.setToolTip("Change overlay color")
+        color_btn.clicked.connect(lambda _, idx=index, btn=color_btn: self._pick_overlay_color(idx, btn))
+        row_layout.addWidget(color_btn)
+        
+        # Remove button
+        remove_btn = QPushButton("×")
+        remove_btn.setFixedSize(20, 20)
+        remove_btn.setToolTip("Remove this overlay")
+        remove_btn.clicked.connect(lambda _, idx=index: self._emit('remove_overlay', idx))
+        row_layout.addWidget(remove_btn)
+        
+        self.overlay_list_layout.addWidget(row_widget)
+        
+        # Show overlay container if hidden
+        self.overlay_container.show()
+    
+    def _pick_overlay_color(self, index: int, btn: QPushButton):
+        """Open color picker for an overlay."""
+        color = QColorDialog.getColor()
+        if color.isValid():
+            btn.setStyleSheet(f"background-color: {color.name()}; border: 1px solid #888;")
+            self._emit('overlay_color_changed', index, color.name())
+    
+    def remove_overlay_row(self, index: int):
+        """Remove a row from the overlay list."""
+        # Find and remove the widget with matching index
+        for i in range(self.overlay_list_layout.count()):
+            widget = self.overlay_list_layout.itemAt(i).widget()
+            if widget and widget.property('overlay_index') == index:
+                widget.deleteLater()
+                break
+        
+        # Hide container if no overlays left
+        if self.overlay_list_layout.count() <= 1:  # Account for pending deleteLater
+            QTimer.singleShot(100, self._check_hide_overlay_container)
+    
+    def _check_hide_overlay_container(self):
+        """Check if overlay container should be hidden."""
+        if self.overlay_list_layout.count() == 0:
+            self.overlay_container.hide()
+    
+    def clear_overlay_list(self):
+        """Clear all overlay rows from the list."""
+        while self.overlay_list_layout.count():
+            item = self.overlay_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.overlay_container.hide()
+    
+    def update_overlay_indices(self, overlays: list):
+        """Rebuild overlay list with current indices after removal (sorted alphabetically)."""
+        self.clear_overlay_list()
+        # Sort by filename
+        sorted_overlays = sorted(enumerate(overlays), key=lambda x: x[1].label.lower())
+        for new_idx, (orig_idx, overlay) in enumerate(sorted_overlays):
+            self.add_overlay_row(orig_idx, overlay.label, overlay.color)
+        if overlays:
+            self.overlay_container.show()
+    
+    def add_stitch_row(self, index: int, label: str):
+        """Add a row to the stitch list for managing a stitched file."""
+        row_widget = QWidget()
+        row_widget.setProperty('stitch_index', index)
+        row_widget.setAttribute(Qt.WA_TranslucentBackground)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        
+        # Visibility checkbox with label (truncated filename - prioritize ending)
+        display_label = label if len(label) <= 20 else "..." + label[-17:]
+        visible_cb = QCheckBox(display_label)
+        visible_cb.setChecked(True)
+        visible_cb.setToolTip(label)  # Full filename in tooltip
+        visible_cb.toggled.connect(lambda checked, idx=index: self._emit('stitch_visibility_changed', idx, checked))
+        row_layout.addWidget(visible_cb, 1)
+        
+        # Remove button
+        remove_btn = QPushButton("×")
+        remove_btn.setFixedSize(20, 20)
+        remove_btn.setToolTip("Remove this file from stitch")
+        remove_btn.clicked.connect(lambda _, idx=index: self._emit('remove_stitch_file', idx))
+        row_layout.addWidget(remove_btn)
+        
+        self.stitch_list_layout.addWidget(row_widget)
+        
+        # Show stitch container if hidden
+        self.stitch_container.show()
+    
+    def remove_stitch_row(self, index: int):
+        """Remove a row from the stitch list."""
+        for i in range(self.stitch_list_layout.count()):
+            widget = self.stitch_list_layout.itemAt(i).widget()
+            if widget and widget.property('stitch_index') == index:
+                widget.deleteLater()
+                break
+    
+    def clear_stitch_list(self):
+        """Clear all stitch rows from the list."""
+        while self.stitch_list_layout.count():
+            item = self.stitch_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.stitch_container.hide()
+    
+    def update_stitch_list(self, file_paths: list):
+        """Rebuild stitch list with current files (sorted alphabetically)."""
+        self.clear_stitch_list()
+        # Sort by filename
+        sorted_paths = sorted(enumerate(file_paths), key=lambda x: os.path.basename(x[1]).lower())
+        for new_idx, (orig_idx, path) in enumerate(sorted_paths):
+            label = os.path.basename(path)
+            self.add_stitch_row(orig_idx, label)
+        if file_paths:
+            self.stitch_container.show()
+    
+    def set_stitch_mode(self, enabled: bool):
+        """Enable or disable stitch mode - disables overlay when stitching."""
+        if enabled:
+            self.overlay_btn.setEnabled(False)
+            self.overlay_btn.setToolTip("Overlay not available for stitched data")
+        else:
+            self.overlay_btn.setEnabled(True)
+            self.overlay_btn.setToolTip("Add overlay trace from another file (Shift+Drop also works)")
+    
     def set_fit_enabled(self, enabled: bool):
         """Enable or disable fitting controls."""
         self.fit_func_combo.setEnabled(enabled)
@@ -1534,6 +1879,10 @@ class Sidebar(QWidget):
                 self.fit_all_btn.setEnabled(False)
                 self.fit_visible_btn.setToolTip("resonator package not installed")
                 self.fit_all_btn.setToolTip("resonator package not installed")
+            # Disable derivative in Argand mode
+            self.derivative_checkbox.setChecked(False)
+            self.derivative_checkbox.setEnabled(False)
+            self.derivative_smoothing_spin.setEnabled(False)
         else:
             # Show standard controls, hide resonator controls
             self.standard_fit_container.show()
@@ -1542,9 +1891,36 @@ class Sidebar(QWidget):
             self.fit_all_btn.setEnabled(True)
             self.fit_visible_btn.setToolTip("Fit data within current view")
             self.fit_all_btn.setToolTip("Fit entire dataset")
+            # Re-enable derivative controls
+            self.derivative_checkbox.setEnabled(True)
+            self.derivative_smoothing_spin.setEnabled(True)
         
         # Clear any existing fit display
         self.clear_fit_display()
+    
+    def set_derivative_mode(self, enabled: bool):
+        """Handle derivative mode - disables fitting when enabled."""
+        if enabled:
+            # Disable fitting when showing derivative
+            self.fit_visible_btn.setEnabled(False)
+            self.fit_all_btn.setEnabled(False)
+            self.fit_visible_btn.setToolTip("Fitting disabled in derivative mode")
+            self.fit_all_btn.setToolTip("Fitting disabled in derivative mode")
+            # Clear any existing fit display
+            self.clear_fit_display()
+        else:
+            # Re-enable fitting (unless in Argand mode without resonator)
+            if self._argand_mode:
+                if HAS_RESONATOR:
+                    self.fit_visible_btn.setEnabled(True)
+                    self.fit_all_btn.setEnabled(True)
+                    self.fit_visible_btn.setToolTip("Fit data within current view")
+                    self.fit_all_btn.setToolTip("Fit entire dataset")
+            else:
+                self.fit_visible_btn.setEnabled(True)
+                self.fit_all_btn.setEnabled(True)
+                self.fit_visible_btn.setToolTip("Fit data within current view")
+                self.fit_all_btn.setToolTip("Fit entire dataset")
     
     def show_resonator_results(self, f_r: float, Q_i: float, Q_c: float, Q_t: float, freq_unit: str = 'Hz'):
         """Display resonator fit results in the sidebar."""
@@ -1971,20 +2347,64 @@ class StitchedDataSource:
         self.metadata = metadata.copy()
         self.file_paths = file_paths
         self.file_path = file_paths[0]  # Primary file
+        self.visibility = [True] * len(datasets)  # Track visibility per file
         
         # Update metadata to indicate stitching
         self.metadata['Stitched'] = f"{len(file_paths)} files"
         self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in file_paths])
         
         # Compute combined axis ranges across all datasets
-        all_xs = np.concatenate([d[0] for d in datasets])
-        all_ys = np.concatenate([d[1] for d in datasets])
-        self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
-        self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+        self._update_combined_limits()
         
         # For compatibility with existing code, expose first dataset's axes
         self.xs = datasets[0][0]
         self.ys = datasets[0][1]
+    
+    def _update_combined_limits(self):
+        """Recompute combined axis limits from visible datasets."""
+        visible_datasets = [d for d, v in zip(self.datasets, self.visibility) if v]
+        if visible_datasets:
+            all_xs = np.concatenate([d[0] for d in visible_datasets])
+            all_ys = np.concatenate([d[1] for d in visible_datasets])
+            self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
+            self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+        else:
+            # Fallback if nothing visible
+            all_xs = np.concatenate([d[0] for d in self.datasets])
+            all_ys = np.concatenate([d[1] for d in self.datasets])
+            self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
+            self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+    
+    def set_visibility(self, index: int, visible: bool):
+        """Set visibility of a stitched file."""
+        if 0 <= index < len(self.visibility):
+            self.visibility[index] = visible
+            self._update_combined_limits()
+    
+    def add_file(self, xs: np.ndarray, ys: np.ndarray, data: np.ndarray, file_path: str):
+        """Add a new file to the stitch."""
+        self.datasets.append((xs, ys, data))
+        self.file_paths.append(file_path)
+        self.visibility.append(True)
+        self._update_combined_limits()
+        # Update metadata
+        self.metadata['Stitched'] = f"{len(self.file_paths)} files"
+        self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in self.file_paths])
+    
+    def remove_file(self, index: int):
+        """Remove a file from the stitch by index."""
+        if 0 <= index < len(self.datasets) and len(self.datasets) > 1:
+            del self.datasets[index]
+            del self.file_paths[index]
+            del self.visibility[index]
+            self._update_combined_limits()
+            # Update metadata
+            self.metadata['Stitched'] = f"{len(self.file_paths)} files"
+            self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in self.file_paths])
+            # Update primary file if needed
+            self.file_path = self.file_paths[0]
+            self.xs = self.datasets[0][0]
+            self.ys = self.datasets[0][1]
     
     def close(self):
         """No-op for stitched data (in-memory, nothing to close)."""
@@ -2005,6 +2425,10 @@ class StitchedDataSource:
     def get_all_datasets(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """Get all (xs, ys, data) tuples for stitched plotting."""
         return self.datasets
+    
+    def get_visible_datasets(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Get only visible (xs, ys, data) tuples for stitched plotting."""
+        return [d for d, v in zip(self.datasets, self.visibility) if v]
     
     def get_combined_xlim(self) -> Tuple[float, float]:
         """Get combined x-axis limits across all datasets."""
@@ -2282,6 +2706,13 @@ class PlotWidget1D(QWidget):
         # Argand mode state
         self._argand_mode = False
         self._resonator_fitter = None  # Stores resonator.LinearShuntFitter object
+        
+        # Derivative mode state
+        self._show_derivative = False
+        self._derivative_smoothing = 0  # 0 = no smoothing
+        
+        # Overlay state
+        self._overlays: List[OverlayData] = []
         
         # Connect mouse events for zoom
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
@@ -2853,6 +3284,60 @@ class PlotWidget1D(QWidget):
             self._delta_callout_first_point = None
             self.update_plot()
     
+    def set_derivative_mode(self, enabled: bool):
+        """Enable or disable derivative plotting mode."""
+        if self._show_derivative != enabled:
+            self._show_derivative = enabled
+            # Reset zoom - y limits will be different for derivative
+            self._ylim = None
+            self._full_ylim = None
+            # Clear fits when switching modes
+            self.clear_fit()
+            self._resonator_fitter = None
+            self.update_plot()
+    
+    def set_derivative_smoothing(self, window: int):
+        """Set the smoothing window for derivative computation."""
+        if self._derivative_smoothing != window:
+            self._derivative_smoothing = window
+            # Only update if derivative mode is on
+            if self._show_derivative:
+                self._ylim = None
+                self._full_ylim = None
+                self.update_plot()
+    
+    def add_overlay(self, overlay: OverlayData):
+        """Add an overlay trace."""
+        self._overlays.append(overlay)
+        self.update_plot()
+    
+    def remove_overlay(self, index: int):
+        """Remove an overlay by index."""
+        if 0 <= index < len(self._overlays):
+            del self._overlays[index]
+            self.update_plot()
+    
+    def set_overlay_visibility(self, index: int, visible: bool):
+        """Set visibility of an overlay."""
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].visible = visible
+            self.update_plot()
+    
+    def set_overlay_color(self, index: int, color: str):
+        """Set color of an overlay."""
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].color = color
+            self.update_plot()
+    
+    def clear_overlays(self):
+        """Remove all overlays."""
+        self._overlays.clear()
+        self.update_plot()
+    
+    def get_overlays(self) -> List[OverlayData]:
+        """Return list of overlays."""
+        return self._overlays
+    
     def fit_resonator(self, background_model: str = 'MagnitudeSlopeOffsetPhaseDelay',
                       visible_only: bool = False) -> Tuple[float, float, float, float]:
         """
@@ -3018,6 +3503,42 @@ class PlotWidget1D(QWidget):
                 # Update _full_ylim if not interchanged, else it holds x range
                 if not self._interchanged:
                     self._full_ylim = data_ylim
+                    
+                    # Expand y-limits to include visible overlays
+                    if self._overlays and not self._argand_mode:
+                        combined_ymin = data_ylim[0]
+                        combined_ymax = data_ylim[1]
+                        for overlay in self._overlays:
+                            if not overlay.visible:
+                                continue
+                            try:
+                                overlay_y = transform(overlay.data)
+                                # Apply derivative if enabled
+                                if self._show_derivative:
+                                    if self._derivative_smoothing > 0:
+                                        from scipy.signal import savgol_filter
+                                        window = self._derivative_smoothing
+                                        if window % 2 == 0:
+                                            window += 1
+                                        if window > len(overlay_y):
+                                            window = len(overlay_y) if len(overlay_y) % 2 == 1 else len(overlay_y) - 1
+                                        if window >= 3:
+                                            dx = np.mean(np.abs(np.diff(overlay.xs)))
+                                            if dx > 0:
+                                                overlay_y = savgol_filter(overlay_y, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx)
+                                    else:
+                                        overlay_y = np.gradient(overlay_y, overlay.xs)
+                                overlay_y = np.where(np.isinf(overlay_y), np.nan, overlay_y)
+                                valid_overlay = overlay_y[~np.isnan(overlay_y)]
+                                if len(valid_overlay) > 0:
+                                    combined_ymin = min(combined_ymin, float(np.min(valid_overlay)))
+                                    combined_ymax = max(combined_ymax, float(np.max(valid_overlay)))
+                            except:
+                                pass
+                        # Add padding
+                        y_range = combined_ymax - combined_ymin
+                        padding = y_range * self.settings.y_padding if y_range > 0 else 0.1
+                        self._full_ylim = (combined_ymin - padding, combined_ymax + padding)
                 
                 # Determine what to plot based on interchange state
                 if self._interchanged:
@@ -3037,8 +3558,50 @@ class PlotWidget1D(QWidget):
                     x_label_default = self.data_source.spec.x_label
                     y_label_default = ylabel
                     
+                    # Expand x-limits to include visible overlays
                     x_full = self._full_xlim
+                    if self._overlays and not self._argand_mode:
+                        xmin, xmax = x_full
+                        for overlay in self._overlays:
+                            if overlay.visible:
+                                xmin = min(xmin, float(np.min(overlay.xs)))
+                                xmax = max(xmax, float(np.max(overlay.xs)))
+                        x_full = (xmin, xmax)
+                        self._full_xlim = x_full
                     y_full = data_ylim
+
+            # Apply derivative if enabled (not in Argand mode)
+            if self._show_derivative and not self._argand_mode:
+                # Apply smoothing if window > 0
+                if self._derivative_smoothing > 0:
+                    from scipy.signal import savgol_filter
+                    window = self._derivative_smoothing
+                    # Ensure window is odd
+                    if window % 2 == 0:
+                        window += 1
+                    # Window must be <= data length
+                    if window > len(plot_y):
+                        window = len(plot_y) if len(plot_y) % 2 == 1 else len(plot_y) - 1
+                    if window >= 3:
+                        # Compute derivative using Savitzky-Golay filter
+                        dx = np.mean(np.abs(np.diff(plot_x)))
+                        if dx > 0:
+                            plot_y = savgol_filter(plot_y, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx)
+                else:
+                    # Use numpy gradient for unsmoothed derivative
+                    plot_y = np.gradient(plot_y, plot_x)
+                
+                # Update y-axis label to indicate derivative
+                y_label_default = f"d({y_label_default})/d({x_label_default})"
+                
+                # Recompute y limits for derivative data
+                valid_deriv = plot_y[~np.isnan(plot_y)]
+                if len(valid_deriv) > 0:
+                    d_min, d_max = float(np.min(valid_deriv)), float(np.max(valid_deriv))
+                    d_range = d_max - d_min
+                    d_padding = d_range * self.settings.y_padding if d_range > 0 else 0.1
+                    y_full = (d_min - d_padding, d_max + d_padding)
+                    self._full_ylim = y_full
 
             # Build marker kwargs
             marker_kwargs = {}
@@ -3050,6 +3613,43 @@ class PlotWidget1D(QWidget):
 
             self.ax.plot(plot_x, plot_y, color=self.settings.line_color,
                          linewidth=self.settings.line_width, **marker_kwargs)
+            
+            # Draw overlays (not in Argand mode)
+            if not self._argand_mode:
+                label, ylabel_orig, transform = self.transforms[self._current_transform]
+                for overlay in self._overlays:
+                    if not overlay.visible:
+                        continue
+                    try:
+                        # Apply same transform to overlay data
+                        overlay_y = transform(overlay.data)
+                        overlay_x = overlay.xs
+                        
+                        # Apply derivative if enabled
+                        if self._show_derivative:
+                            if self._derivative_smoothing > 0:
+                                from scipy.signal import savgol_filter
+                                window = self._derivative_smoothing
+                                if window % 2 == 0:
+                                    window += 1
+                                if window > len(overlay_y):
+                                    window = len(overlay_y) if len(overlay_y) % 2 == 1 else len(overlay_y) - 1
+                                if window >= 3:
+                                    dx = np.mean(np.abs(np.diff(overlay_x)))
+                                    if dx > 0:
+                                        overlay_y = savgol_filter(overlay_y, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx)
+                            else:
+                                overlay_y = np.gradient(overlay_y, overlay_x)
+                        
+                        # Handle interchange
+                        if self._interchanged:
+                            self.ax.plot(overlay_y, overlay_x, color=overlay.color,
+                                         linewidth=self.settings.line_width, alpha=0.8)
+                        else:
+                            self.ax.plot(overlay_x, overlay_y, color=overlay.color,
+                                         linewidth=self.settings.line_width, alpha=0.8)
+                    except Exception as e:
+                        print(f"Overlay plot error: {e}")
             
             # Apply custom or default labels
             x_label = self.settings.x_label_text if self.settings.x_label_text else x_label_default
@@ -3298,6 +3898,13 @@ class PlotWidget2D(QWidget):
         # Argand mode state
         self._argand_mode = False
         self._resonator_fitter = None  # Stores resonator.LinearShuntFitter object
+        
+        # Derivative mode state
+        self._show_derivative = False
+        self._derivative_smoothing = 0  # 0 = no smoothing
+        
+        # Overlay state
+        self._overlays: List[OverlayData] = []
 
         # Initialize axes (will be configured in _setup_axes)
         self.ax_2d = None
@@ -3709,7 +4316,7 @@ class PlotWidget2D(QWidget):
                     best_dist = float('inf')
                     best_point = None
                     
-                    for xs, ys, data in self.data_source.get_all_datasets():
+                    for xs, ys, data in self.data_source.get_visible_datasets():
                         x_idx = np.argmin(np.abs(xs - event.xdata))
                         y_idx = np.argmin(np.abs(ys - event.ydata))
                         x_val = xs[x_idx]
@@ -3770,7 +4377,7 @@ class PlotWidget2D(QWidget):
                     best_dist = float('inf')
                     best_point = None
                     
-                    for xs, ys, data in self.data_source.get_all_datasets():
+                    for xs, ys, data in self.data_source.get_visible_datasets():
                         x_idx = np.argmin(np.abs(xs - event.xdata))
                         y_idx = np.argmin(np.abs(ys - event.ydata))
                         x_val = xs[x_idx]
@@ -3843,7 +4450,7 @@ class PlotWidget2D(QWidget):
                     best_dist = float('inf')
                     best_point = None
                     
-                    for xs, ys, data in self.data_source.get_all_datasets():
+                    for xs, ys, data in self.data_source.get_visible_datasets():
                         x_idx = np.argmin(np.abs(xs - event.xdata))
                         y_idx = np.argmin(np.abs(ys - event.ydata))
                         x_val = xs[x_idx]
@@ -4211,6 +4818,55 @@ class PlotWidget2D(QWidget):
             self._resonator_fitter = None
             self.update_plot()
     
+    def set_derivative_mode(self, enabled: bool):
+        """Enable or disable derivative plotting mode."""
+        if self._show_derivative != enabled:
+            self._show_derivative = enabled
+            # Clear fits when switching modes
+            self.clear_fit()
+            self._resonator_fitter = None
+            self.update_plot()
+    
+    def set_derivative_smoothing(self, window: int):
+        """Set the smoothing window for derivative computation."""
+        if self._derivative_smoothing != window:
+            self._derivative_smoothing = window
+            # Only update if derivative mode is on
+            if self._show_derivative:
+                self.update_plot()
+    
+    def add_overlay(self, overlay: OverlayData):
+        """Add an overlay trace."""
+        self._overlays.append(overlay)
+        self.update_plot()
+    
+    def remove_overlay(self, index: int):
+        """Remove an overlay by index."""
+        if 0 <= index < len(self._overlays):
+            del self._overlays[index]
+            self.update_plot()
+    
+    def set_overlay_visibility(self, index: int, visible: bool):
+        """Set visibility of an overlay."""
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].visible = visible
+            self.update_plot()
+    
+    def set_overlay_color(self, index: int, color: str):
+        """Set color of an overlay."""
+        if 0 <= index < len(self._overlays):
+            self._overlays[index].color = color
+            self.update_plot()
+    
+    def clear_overlays(self):
+        """Remove all overlays."""
+        self._overlays.clear()
+        self.update_plot()
+    
+    def get_overlays(self) -> List[OverlayData]:
+        """Return list of overlays."""
+        return self._overlays
+    
     def fit_resonator(self, background_model: str = 'MagnitudeSlopeOffsetPhaseDelay',
                       visible_only: bool = False) -> Tuple[float, float, float, float]:
         """
@@ -4315,7 +4971,7 @@ class PlotWidget2D(QWidget):
                 # Compute min/max across all datasets
                 all_mins = []
                 all_maxs = []
-                for xs, ys, data in self.data_source.get_all_datasets():
+                for xs, ys, data in self.data_source.get_visible_datasets():
                     # Apply S21 rotation if enabled
                     if self._rotate_s21:
                         data = rotate_s21(data)
@@ -4385,7 +5041,7 @@ class PlotWidget2D(QWidget):
                     if vcenter is None:
                         # Compute median across all datasets
                         all_data = []
-                        for xs, ys, data in self.data_source.get_all_datasets():
+                        for xs, ys, data in self.data_source.get_visible_datasets():
                             if self._rotate_s21:
                                 data = rotate_s21(data)
                             try:
@@ -4401,7 +5057,7 @@ class PlotWidget2D(QWidget):
                     norm = Normalize(vmin=vmin, vmax=vmax)
                 
                 pcm = None
-                for xs, ys, data in self.data_source.get_all_datasets():
+                for xs, ys, data in self.data_source.get_visible_datasets():
                     # Apply S21 rotation if enabled
                     if self._rotate_s21:
                         data = rotate_s21(data)
@@ -4434,6 +5090,31 @@ class PlotWidget2D(QWidget):
                 # Transpose if axes have been interchanged
                 if getattr(self, '_interchanged', False):
                     zs = zs.T
+                
+                # Apply derivative along x-axis if enabled (not in Argand mode)
+                if self._show_derivative and not self._argand_mode:
+                    # Get x-coordinates for derivative
+                    x_coords = self.xs
+                    
+                    # Apply derivative along axis=1 (x-axis direction)
+                    if self._derivative_smoothing > 0:
+                        from scipy.signal import savgol_filter
+                        window = self._derivative_smoothing
+                        if window % 2 == 0:
+                            window += 1
+                        if window > zs.shape[1]:
+                            window = zs.shape[1] if zs.shape[1] % 2 == 1 else zs.shape[1] - 1
+                        if window >= 3:
+                            dx = np.mean(np.abs(np.diff(x_coords)))
+                            if dx > 0:
+                                # Apply savgol_filter along axis=1 for each row
+                                zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                    else:
+                        # Use numpy gradient
+                        zs = np.gradient(zs, x_coords, axis=1)
+                    
+                    # Update ylabel to indicate derivative
+                    ylabel = f"d({ylabel})/d({self.data_source.spec.x_label})"
 
                 y_idx = min(y_idx, zs.shape[0] - 1) if zs.ndim > 1 else 0
                 x_idx = min(x_idx, zs.shape[1] - 1) if zs.ndim > 1 else min(x_idx, len(zs) - 1)
@@ -4625,6 +5306,43 @@ class PlotWidget2D(QWidget):
                                 self.ax_xcut.set_xlim(self._full_xlim[0], self._full_xlim[1])
                         self.ax_xcut.set_aspect('auto')
                         
+                        # Draw overlays on horizontal linecut (not in Argand mode)
+                        for overlay in self._overlays:
+                            if not overlay.visible or not overlay.is_2d:
+                                continue
+                            try:
+                                # Get same y-index slice from overlay
+                                label_o, ylabel_o, transform_o = self.transforms[self._current_transform]
+                                overlay_zs = transform_o(overlay.data)
+                                
+                                # Handle transpose for interchange
+                                if self._interchanged:
+                                    overlay_zs = overlay_zs.T
+                                
+                                # Apply derivative if enabled
+                                if self._show_derivative:
+                                    if self._derivative_smoothing > 0:
+                                        from scipy.signal import savgol_filter
+                                        window = self._derivative_smoothing
+                                        if window % 2 == 0:
+                                            window += 1
+                                        if window > overlay_zs.shape[1]:
+                                            window = overlay_zs.shape[1] if overlay_zs.shape[1] % 2 == 1 else overlay_zs.shape[1] - 1
+                                        if window >= 3:
+                                            dx = np.mean(np.abs(np.diff(overlay.xs)))
+                                            if dx > 0:
+                                                overlay_zs = savgol_filter(overlay_zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                                    else:
+                                        overlay_zs = np.gradient(overlay_zs, overlay.xs, axis=1)
+                                
+                                # Get slice at same index (if within bounds)
+                                if overlay_zs.shape[0] > y_idx:
+                                    self.ax_xcut.plot(overlay.xs, overlay_zs[y_idx], 
+                                                      color=overlay.color,
+                                                      linewidth=self.settings.line_width, alpha=0.8)
+                            except Exception as e:
+                                print(f"Overlay linecut error: {e}")
+                        
                 if self.settings.grid_enabled:
                     self.ax_xcut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
                 # Apply tick settings to linecut
@@ -4647,6 +5365,42 @@ class PlotWidget2D(QWidget):
                     else:
                         x_val_str = f'{x_val:.4g}'
                     self.ax_ycut.set_title(f'{x_label} = {x_val_str}', fontsize=10)
+                    
+                    # Draw overlays on vertical linecut
+                    for overlay in self._overlays:
+                        if not overlay.visible or not overlay.is_2d:
+                            continue
+                        try:
+                            label_o, ylabel_o, transform_o = self.transforms[self._current_transform]
+                            overlay_zs = transform_o(overlay.data)
+                            
+                            if self._interchanged:
+                                overlay_zs = overlay_zs.T
+                            
+                            # Apply derivative if enabled
+                            if self._show_derivative:
+                                if self._derivative_smoothing > 0:
+                                    from scipy.signal import savgol_filter
+                                    window = self._derivative_smoothing
+                                    if window % 2 == 0:
+                                        window += 1
+                                    if window > overlay_zs.shape[1]:
+                                        window = overlay_zs.shape[1] if overlay_zs.shape[1] % 2 == 1 else overlay_zs.shape[1] - 1
+                                    if window >= 3:
+                                        dx = np.mean(np.abs(np.diff(overlay.xs)))
+                                        if dx > 0:
+                                            overlay_zs = savgol_filter(overlay_zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                                else:
+                                    overlay_zs = np.gradient(overlay_zs, overlay.xs, axis=1)
+                            
+                            # Get slice at same index (if within bounds)
+                            if overlay_zs.shape[1] > x_idx and overlay.ys is not None:
+                                self.ax_ycut.plot(overlay.ys, overlay_zs[:, x_idx], 
+                                                  color=overlay.color,
+                                                  linewidth=self.settings.line_width, alpha=0.8)
+                        except Exception as e:
+                            print(f"Overlay vertical linecut error: {e}")
+                            
                 self.ax_ycut.set_xlabel(y_label, fontsize=self.settings.label_size)
                 self.ax_ycut.set_ylabel(ylabel, fontsize=self.settings.label_size)
                 # Apply y zoom/flip to y-cut
@@ -4746,6 +5500,8 @@ class Plotter(QMainWindow):
         self.settings = PlotSettings()
         self.sidebar_visible = True
         self._current_fit_result = None  # Stores current fit result for copy
+        self._current_resonator_result = None  # Stores current resonator fit result
+        self._stitch_spec = None  # Stores spec for stitch validation
 
         self._setup_ui()
         self.setAcceptDrops(True)
@@ -4861,7 +5617,7 @@ class Plotter(QMainWindow):
         content_layout.addLayout(top_bar)
 
         # Drop zone
-        self.drop_label = QLabel("Drag and drop your HDF5 file here")
+        self.drop_label = QLabel("Drag and drop your HDF5 file here\n\n(Shift+Drop to add as overlay)")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setStyleSheet(
             "border: 2px dashed #aaa; padding: 40px; font-size: 20px; color: #666;"
@@ -4904,10 +5660,25 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('change_figsize', self._on_change_figsize)
         self.sidebar.set_callback('set_limits', self._on_set_limits)
         self.sidebar.set_callback('stitch_files', self._on_stitch_files)
+        # Stitch list callbacks
+        self.sidebar.set_callback('stitch_visibility_changed', self._on_stitch_visibility_changed)
+        self.sidebar.set_callback('remove_stitch_file', self._on_remove_stitch_file)
+        self.sidebar.set_callback('clear_stitch', self._on_clear_stitch)
+        # Set up drop callback for stitch container
+        self.sidebar.stitch_container.set_drop_callback(self._on_stitch_drop)
+        # Overlay callbacks
+        self.sidebar.set_callback('add_overlay', self._on_add_overlay)
+        self.sidebar.set_callback('remove_overlay', self._on_remove_overlay)
+        self.sidebar.set_callback('clear_overlays', self._on_clear_overlays)
+        self.sidebar.set_callback('overlay_visibility_changed', self._on_overlay_visibility_changed)
+        self.sidebar.set_callback('overlay_color_changed', self._on_overlay_color_changed)
         self.sidebar.set_callback('import_style', self._on_import_style)
         self.sidebar.set_callback('export_style', self._on_export_style)
         # Argand mode callback
         self.sidebar.set_callback('argand_toggled', self._on_argand_toggled)
+        # Derivative mode callbacks
+        self.sidebar.set_callback('derivative_toggled', self._on_derivative_toggled)
+        self.sidebar.set_callback('derivative_smoothing_changed', self._on_derivative_smoothing_changed)
         # Fitting callbacks
         self.sidebar.set_callback('fit_visible', self._on_fit_visible)
         self.sidebar.set_callback('fit_all', self._on_fit_all)
@@ -5393,6 +6164,270 @@ class Plotter(QMainWindow):
         if dialog.exec_() == QDialog.Accepted and dialog.stitch_files:
             self._perform_stitch(dialog.stitch_files, dialog.detected_spec)
 
+    def _on_add_overlay(self):
+        """Open file picker to add an overlay."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Add Overlay", "", "HDF5 Files (*.h5 *.hdf5)")
+        
+        if file_path:
+            self._add_overlay_from_file(file_path)
+    
+    def _add_overlay_from_file(self, file_path: str):
+        """Load a file and add it as an overlay."""
+        if not self.plot_widget:
+            QMessageBox.warning(self, "No Plot", "Please load a main file first.")
+            return
+        
+        try:
+            # Phase 1: Detect experiment type
+            spec = None
+            with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                # Read metadata to detect experiment type (same as stitch/load_file)
+                try:
+                    metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+                except:
+                    metadata = {'Expt ID': os.path.basename(file_path)}
+                
+                expt_id = metadata.get('Expt ID', '')
+                
+                # Find matching experiment type
+                expt_type = None
+                for exp_name in EXPERIMENT_REGISTRY:
+                    if exp_name in expt_id:
+                        expt_type = exp_name
+                        break
+                
+                if expt_type is not None:
+                    spec = EXPERIMENT_REGISTRY[expt_type]
+            
+            # If unknown, open axis selection dialog (file is closed now)
+            if spec is None:
+                dialog = AxisSelectionDialog(file_path, self)
+                if dialog.exec_() != QDialog.Accepted:
+                    return  # User cancelled
+                spec = dialog.get_spec()
+            
+            # Determine if 1D or 2D
+            is_overlay_2d = spec.y_key is not None
+            
+            # Check dimensionality match
+            main_is_2d = isinstance(self.plot_widget, PlotWidget2D)
+            
+            if is_overlay_2d != main_is_2d:
+                dim_main = "2D" if main_is_2d else "1D"
+                dim_overlay = "2D" if is_overlay_2d else "1D"
+                QMessageBox.warning(self, "Dimension Mismatch",
+                                    f"Cannot overlay {dim_overlay} data on {dim_main} plot.")
+                return
+            
+            # Phase 2: Load data
+            with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                xs = np.array(f[spec.x_key]) * spec.x_scale
+                ys = None
+                if is_overlay_2d:
+                    ys = np.array(f[spec.y_key]) * spec.y_scale
+                
+                data = np.array(f[spec.data_key])
+            
+            # Assign color from palette
+            num_overlays = len(self.plot_widget.get_overlays())
+            color = OVERLAY_COLORS[num_overlays % len(OVERLAY_COLORS)]
+            
+            # Create overlay object
+            label = os.path.basename(file_path)
+            overlay = OverlayData(
+                xs=xs,
+                data=data,
+                ys=ys,
+                label=label,
+                color=color,
+                visible=True,
+                source_path=file_path,
+                x_label=spec.x_label,
+                is_2d=is_overlay_2d
+            )
+            
+            # Add to plot widget
+            self.plot_widget.add_overlay(overlay)
+            
+            # Expand plot limits to include overlay data
+            limits_changed = False
+            if hasattr(self.plot_widget, '_full_xlim'):
+                old_xlim = self.plot_widget._full_xlim
+                new_xmin = min(old_xlim[0], float(np.min(xs)))
+                new_xmax = max(old_xlim[1], float(np.max(xs)))
+                if new_xmin != old_xlim[0] or new_xmax != old_xlim[1]:
+                    self.plot_widget._full_xlim = (new_xmin, new_xmax)
+                    self.plot_widget._xlim = None  # Reset zoom to show all
+                    limits_changed = True
+            
+            if is_overlay_2d and ys is not None and hasattr(self.plot_widget, '_full_ylim'):
+                old_ylim = self.plot_widget._full_ylim
+                new_ymin = min(old_ylim[0], float(np.min(ys)))
+                new_ymax = max(old_ylim[1], float(np.max(ys)))
+                if new_ymin != old_ylim[0] or new_ymax != old_ylim[1]:
+                    self.plot_widget._full_ylim = (new_ymin, new_ymax)
+                    self.plot_widget._ylim = None  # Reset zoom to show all
+                    limits_changed = True
+            elif not is_overlay_2d:
+                # For 1D plots, reset y-limits so they're recomputed with overlay data
+                self.plot_widget._ylim = None
+                self.plot_widget._full_ylim = None
+                limits_changed = True
+            
+            # Update plot again if limits changed
+            if limits_changed:
+                self.plot_widget.update_plot()
+            
+            # Rebuild sidebar list (sorted alphabetically)
+            self.sidebar.update_overlay_indices(self.plot_widget.get_overlays())
+                
+        except Exception as e:
+            QMessageBox.warning(self, "Error Loading Overlay", str(e))
+    
+    def _on_remove_overlay(self, index: int):
+        """Remove an overlay by index."""
+        if self.plot_widget:
+            self.plot_widget.remove_overlay(index)
+            # Rebuild sidebar list with updated indices
+            self.sidebar.update_overlay_indices(self.plot_widget.get_overlays())
+    
+    def _on_clear_overlays(self):
+        """Clear all overlays."""
+        if self.plot_widget:
+            self.plot_widget.clear_overlays()
+            self.sidebar.clear_overlay_list()
+    
+    def _on_overlay_visibility_changed(self, index: int, visible: bool):
+        """Handle overlay visibility toggle."""
+        if self.plot_widget:
+            self.plot_widget.set_overlay_visibility(index, visible)
+    
+    def _on_overlay_color_changed(self, index: int, color: str):
+        """Handle overlay color change."""
+        if self.plot_widget:
+            self.plot_widget.set_overlay_color(index, color)
+
+    def _on_stitch_visibility_changed(self, index: int, visible: bool):
+        """Handle stitch file visibility toggle."""
+        if self.data_source and hasattr(self.data_source, 'set_visibility'):
+            self.data_source.set_visibility(index, visible)
+            if self.plot_widget:
+                self.plot_widget.update_plot()
+    
+    def _on_remove_stitch_file(self, index: int):
+        """Remove a file from the stitch."""
+        if self.data_source and hasattr(self.data_source, 'remove_file'):
+            # Don't allow removing if only one file left
+            if len(self.data_source.file_paths) <= 1:
+                QMessageBox.warning(self, "Cannot Remove", 
+                                    "Cannot remove the last file. Use 'Clear All' to exit stitch mode.")
+                return
+            
+            self.data_source.remove_file(index)
+            # Update sidebar list
+            self.sidebar.update_stitch_list(self.data_source.file_paths)
+            # Update file info
+            self.file_info_label.setText(self.data_source.file_info)
+            self.sidebar.set_metadata(self.data_source.metadata_str)
+            if self.plot_widget:
+                self.plot_widget.update_plot()
+    
+    def _on_clear_stitch(self):
+        """Clear stitch and return to empty state."""
+        # Close data source
+        if self.data_source:
+            self.data_source.close()
+            self.data_source = None
+        
+        # Remove plot widget
+        if self.plot_widget:
+            self.plot_container.removeWidget(self.plot_widget)
+            self.plot_widget.deleteLater()
+            self.plot_widget = None
+        
+        # Clear stitch state
+        self._stitch_spec = None
+        
+        # Clear sidebar
+        self.sidebar.clear_stitch_list()
+        self.sidebar.set_stitch_mode(False)
+        
+        # Re-enable live updates and linecuts checkboxes
+        self.sidebar.live_checkbox.setEnabled(True)
+        self.sidebar.live_checkbox.setToolTip("")
+        self.sidebar.linecuts_checkbox.setEnabled(True)
+        self.sidebar.linecuts_checkbox.setToolTip("")
+        
+        # Show drop zone
+        self.drop_label.show()
+        self.file_info_label.setText("")
+    
+    def _on_stitch_drop(self, file_paths: List[str]):
+        """Handle files dropped onto stitch container."""
+        if not self.data_source or not hasattr(self.data_source, 'add_file'):
+            return
+        
+        spec = getattr(self, '_stitch_spec', None)
+        if not spec:
+            return
+        
+        for file_path in file_paths:
+            try:
+                # Validate file
+                with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                    # Check experiment type matches
+                    try:
+                        metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+                    except:
+                        metadata = {'Expt ID': os.path.basename(file_path)}
+                    
+                    expt_id = metadata.get('Expt ID', '')
+                    
+                    # Find matching experiment type
+                    file_expt_type = None
+                    for exp_name in EXPERIMENT_REGISTRY:
+                        if exp_name in expt_id:
+                            file_expt_type = exp_name
+                            break
+                    
+                    if file_expt_type is None:
+                        QMessageBox.warning(self, "Unknown Experiment",
+                                            f"Cannot add {os.path.basename(file_path)}:\n"
+                                            f"Unknown experiment type (Expt ID: {expt_id})")
+                        continue
+                    
+                    # Check if file already in stitch
+                    if file_path in self.data_source.file_paths:
+                        continue  # Skip duplicates silently
+                    
+                    # Load data
+                    source = HDF5DataSource(file_path, spec)
+                    xs, ys = source.get_axes()
+                    data = source.get_data()
+                    source.close()
+                    
+                    # Add to stitch
+                    self.data_source.add_file(xs.copy(), ys.copy(), data.copy(), file_path)
+                    
+            except Exception as e:
+                QMessageBox.warning(self, "Error Adding File",
+                                    f"Failed to add {os.path.basename(file_path)}:\n{str(e)}")
+        
+        # Update UI
+        self.sidebar.update_stitch_list(self.data_source.file_paths)
+        self.file_info_label.setText(self.data_source.file_info)
+        self.sidebar.set_metadata(self.data_source.metadata_str)
+        if self.plot_widget:
+            # Reset plot limits to include all stitched data
+            xlim = self.data_source.get_combined_xlim()
+            ylim = self.data_source.get_combined_ylim()
+            self.plot_widget._full_xlim = xlim
+            self.plot_widget._full_ylim = ylim
+            self.plot_widget._xlim = None  # Reset zoom to show all
+            self.plot_widget._ylim = None
+            self.plot_widget.update_plot()
+
     def _on_export_style(self):
         """Export appearance settings to JSON file."""
         file_path, _ = QFileDialog.getSaveFileName(
@@ -5573,6 +6608,11 @@ class Plotter(QMainWindow):
         if not self.plot_widget:
             return
         
+        # Don't fit in derivative mode
+        if hasattr(self.plot_widget, '_show_derivative') and self.plot_widget._show_derivative:
+            self.sidebar.show_fit_error("Fitting disabled in derivative mode")
+            return
+        
         # Check if in Argand mode
         if self.sidebar._argand_mode:
             # Resonator fitting
@@ -5652,6 +6692,20 @@ class Plotter(QMainWindow):
         if self.plot_widget:
             self.plot_widget.set_argand_mode(enabled)
     
+    def _on_derivative_toggled(self, enabled: bool):
+        """Handle derivative mode toggle."""
+        # Update sidebar UI (disable fitting when derivative is on)
+        self.sidebar.set_derivative_mode(enabled)
+        
+        # Update plot widget
+        if self.plot_widget:
+            self.plot_widget.set_derivative_mode(enabled)
+    
+    def _on_derivative_smoothing_changed(self, window: int):
+        """Handle derivative smoothing window change."""
+        if self.plot_widget:
+            self.plot_widget.set_derivative_smoothing(window)
+    
     def _on_copy_fit_results(self):
         """Copy fit results to clipboard."""
         # Check for resonator results first
@@ -5708,6 +6762,9 @@ class Plotter(QMainWindow):
             if self.data_source and hasattr(self.data_source, 'close'):
                 self.data_source.close()
             
+            # Clear any existing overlays
+            self.sidebar.clear_overlay_list()
+            
             # Load all sources and collect datasets
             datasets = []  # List of (xs, ys, data) tuples
             all_sources = []
@@ -5731,6 +6788,9 @@ class Plotter(QMainWindow):
             new_data_source = StitchedDataSource(
                 datasets, spec, metadata, file_paths
             )
+            
+            # Store stitch spec for validating drops
+            self._stitch_spec = spec
             
             # Now recreate the plot widget
             if self.update_timer:
@@ -5771,6 +6831,12 @@ class Plotter(QMainWindow):
             self.sidebar.linecuts_checkbox.setChecked(False)
             self.sidebar.linecuts_checkbox.setEnabled(False)
             self.sidebar.linecuts_checkbox.setToolTip("Linecuts not available for stitched data")
+            
+            # Enable stitch mode (disables overlay button)
+            self.sidebar.set_stitch_mode(True)
+            
+            # Show stitch list manager
+            self.sidebar.update_stitch_list(file_paths)
             
             self.plot_container.addWidget(self.plot_widget)
             self.plot_widget.update_plot()
@@ -6010,9 +7076,22 @@ class Plotter(QMainWindow):
         self._current_fit_result = None
         self._current_resonator_result = None
         
+        # Clear overlays (new file loaded)
+        self.sidebar.clear_overlay_list()
+        
+        # Clear stitch state (new file loaded)
+        self.sidebar.clear_stitch_list()
+        self.sidebar.set_stitch_mode(False)
+        self._stitch_spec = None
+        
         # Sync Argand mode with sidebar state
         if self.sidebar._argand_mode:
             self.plot_widget.set_argand_mode(True)
+        
+        # Sync derivative mode with sidebar state
+        if self.sidebar.derivative_checkbox.isChecked():
+            self.plot_widget.set_derivative_mode(True)
+            self.plot_widget.set_derivative_smoothing(self.sidebar.derivative_smoothing_spin.value())
         
         # Re-enable live updates (may have been disabled by stitched data)
         self.sidebar.live_checkbox.setEnabled(True)
@@ -6051,7 +7130,12 @@ class Plotter(QMainWindow):
         event.setDropAction(Qt.CopyAction)
         event.accept()
         file_path = event.mimeData().urls()[0].toLocalFile()
-        self.load_file(file_path)
+        
+        # Shift+Drop adds as overlay, normal drop replaces
+        if event.keyboardModifiers() & Qt.ShiftModifier:
+            self._add_overlay_from_file(file_path)
+        else:
+            self.load_file(file_path)
 
     def closeEvent(self, event):
         if self.update_timer:
