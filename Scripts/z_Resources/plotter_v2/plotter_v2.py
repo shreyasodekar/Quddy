@@ -694,8 +694,7 @@ class Sidebar(QWidget):
         data_section.add_layout(stitch_overlay_layout)
         
         # Overlay list manager (hidden by default, shown when overlays exist)
-        self.overlay_container = QGroupBox("Overlays")
-        self.overlay_container.setStyleSheet("""
+        self._overlay_groupbox_normal_style = """
             QGroupBox {
                 font-weight: bold;
                 font-size: 11px;
@@ -710,7 +709,28 @@ class Sidebar(QWidget):
                 left: 8px;
                 padding: 0 4px;
             }
-        """)
+        """
+        self._overlay_groupbox_highlight_style = """
+            QGroupBox {
+                font-weight: bold;
+                font-size: 11px;
+                border: 2px solid #4a90d9;
+                border-radius: 4px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background-color: rgba(74, 144, 217, 0.1);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
+        """
+        self.overlay_container = DroppableGroupBox("Overlays")
+        self.overlay_container.set_styles(
+            self._overlay_groupbox_normal_style,
+            self._overlay_groupbox_highlight_style
+        )
         overlay_container_layout = QVBoxLayout(self.overlay_container)
         overlay_container_layout.setContentsMargins(6, 6, 6, 6)
         overlay_container_layout.setSpacing(2)
@@ -5672,6 +5692,8 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('clear_overlays', self._on_clear_overlays)
         self.sidebar.set_callback('overlay_visibility_changed', self._on_overlay_visibility_changed)
         self.sidebar.set_callback('overlay_color_changed', self._on_overlay_color_changed)
+        # Set up drop callback for overlay container
+        self.sidebar.overlay_container.set_drop_callback(self._on_overlay_drop)
         self.sidebar.set_callback('import_style', self._on_import_style)
         self.sidebar.set_callback('export_style', self._on_export_style)
         # Argand mode callback
@@ -6307,6 +6329,11 @@ class Plotter(QMainWindow):
         """Handle overlay color change."""
         if self.plot_widget:
             self.plot_widget.set_overlay_color(index, color)
+
+    def _on_overlay_drop(self, file_paths: List[str]):
+        """Handle files dropped onto overlay container."""
+        for file_path in file_paths:
+            self._add_overlay_from_file(file_path)
 
     def _on_stitch_visibility_changed(self, index: int, visible: bool):
         """Handle stitch file visibility toggle."""
