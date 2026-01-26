@@ -43,6 +43,13 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
+# Optional: resonator package for Argand plane fitting
+try:
+    from resonator import shunt, background as resonator_background
+    HAS_RESONATOR = True
+except ImportError:
+    HAS_RESONATOR = False
+
 
 class ExperimentType(Enum):
     CW_1D = auto()
@@ -602,11 +609,23 @@ class Sidebar(QWidget):
         self.stitch_btn.setToolTip("Combine multiple HDF5 files of the same experiment type")
         self.stitch_btn.clicked.connect(lambda: self._emit('stitch_files'))
         data_section.add_widget(self.stitch_btn)
+        
+        # Argand mode checkbox
+        self.argand_checkbox = QCheckBox("Argand (Complex Plane)")
+        self.argand_checkbox.setToolTip("Plot Re[S21] vs Im[S21] - useful for resonator visualization")
+        self.argand_checkbox.toggled.connect(lambda c: self._emit('argand_toggled', c))
+        data_section.add_widget(self.argand_checkbox)
 
         self.scroll_layout.addWidget(data_section)
 
         # === Fitting Section (for 1D and 2D linecuts) ===
         self.fitting_section = CollapsibleSection("Fitting", start_collapsed=True)
+        
+        # --- Standard fitting controls (hidden in Argand mode) ---
+        self.standard_fit_container = QWidget()
+        standard_fit_layout = QVBoxLayout(self.standard_fit_container)
+        standard_fit_layout.setContentsMargins(0, 0, 0, 0)
+        standard_fit_layout.setSpacing(4)
         
         # Function selector
         fit_func_layout = QVBoxLayout()
@@ -615,7 +634,7 @@ class Sidebar(QWidget):
         self.fit_func_combo.addItems(list(FIT_MODELS.keys()))
         self.fit_func_combo.currentTextChanged.connect(self._on_fit_func_changed)
         fit_func_layout.addWidget(self.fit_func_combo)
-        self.fitting_section.add_layout(fit_func_layout)
+        standard_fit_layout.addLayout(fit_func_layout)
         
         # Initial guesses container (will be populated dynamically)
         self.fit_guesses_container = QWidget()
@@ -623,8 +642,29 @@ class Sidebar(QWidget):
         self.fit_guesses_layout.setContentsMargins(0, 0, 0, 0)
         self.fit_guesses_layout.setSpacing(4)
         self.fit_guess_edits = {}  # param_name -> QLineEdit
-        self.fitting_section.add_widget(self.fit_guesses_container)
+        standard_fit_layout.addWidget(self.fit_guesses_container)
         
+        self.fitting_section.add_widget(self.standard_fit_container)
+        
+        # --- Resonator fitting controls (shown in Argand mode) ---
+        self.resonator_fit_container = QWidget()
+        resonator_fit_layout = QVBoxLayout(self.resonator_fit_container)
+        resonator_fit_layout.setContentsMargins(0, 0, 0, 0)
+        resonator_fit_layout.setSpacing(4)
+        
+        # Resonator info label
+        if HAS_RESONATOR:
+            resonator_info = QLabel("Uses resonator package for\nshunt resonator fitting\n(MagnitudeSlopeOffsetPhaseDelay)")
+        else:
+            resonator_info = QLabel("⚠ resonator package not installed\nInstall with: pip install resonator")
+            resonator_info.setStyleSheet("color: #dc2626;")
+        resonator_info.setStyleSheet(resonator_info.styleSheet() + "font-size: 10px; font-style: italic;")
+        resonator_fit_layout.addWidget(resonator_info)
+        
+        self.resonator_fit_container.hide()  # Hidden by default
+        self.fitting_section.add_widget(self.resonator_fit_container)
+        
+        # --- Shared fit controls ---
         # Fit buttons
         fit_buttons_layout = QHBoxLayout()
         self.fit_visible_btn = QPushButton("Fit Visible")
@@ -680,6 +720,9 @@ class Sidebar(QWidget):
         
         # Populate initial guesses for default function
         self._update_fit_guess_fields()
+        
+        # Track Argand mode state
+        self._argand_mode = False
 
         # === Color Scale Section (for 2D) ===
         self.scale_section = CollapsibleSection("Color Scale", start_collapsed=True)
@@ -1476,6 +1519,56 @@ class Sidebar(QWidget):
         else:
             self.fit_visible_btn.setToolTip("Fit data within current view")
             self.fit_all_btn.setToolTip("Fit entire dataset")
+    
+    def set_argand_mode(self, argand_on: bool):
+        """Switch between standard fitting and resonator fitting UI."""
+        self._argand_mode = argand_on
+        
+        if argand_on:
+            # Show resonator controls, hide standard controls
+            self.standard_fit_container.hide()
+            self.resonator_fit_container.show()
+            # Disable fitting if resonator package not installed
+            if not HAS_RESONATOR:
+                self.fit_visible_btn.setEnabled(False)
+                self.fit_all_btn.setEnabled(False)
+                self.fit_visible_btn.setToolTip("resonator package not installed")
+                self.fit_all_btn.setToolTip("resonator package not installed")
+        else:
+            # Show standard controls, hide resonator controls
+            self.standard_fit_container.show()
+            self.resonator_fit_container.hide()
+            self.fit_visible_btn.setEnabled(True)
+            self.fit_all_btn.setEnabled(True)
+            self.fit_visible_btn.setToolTip("Fit data within current view")
+            self.fit_all_btn.setToolTip("Fit entire dataset")
+        
+        # Clear any existing fit display
+        self.clear_fit_display()
+    
+    def show_resonator_results(self, f_r: float, Q_i: float, Q_c: float, Q_t: float, freq_unit: str = 'Hz'):
+        """Display resonator fit results in the sidebar."""
+        self.fit_error_label.hide()
+        
+        lines = [
+            f"f_r: {f_r:.6e} {freq_unit}",
+            f"Q_i: {Q_i:.0f}",
+            f"Q_c: {Q_c:.0f}",
+            f"Q_t: {Q_t:.0f}",
+        ]
+        
+        self.fit_results_label.setText("\n".join(lines))
+        self.fit_results_label.show()
+        self.copy_fit_btn.show()
+        
+        # Show fit style controls
+        self.fit_color_label.show()
+        self.fit_color_button.show()
+        self.fit_style_container.show()
+    
+    def get_background_model(self) -> str:
+        """Get the background model name (fixed to MagnitudeSlopeOffsetPhaseDelay)."""
+        return 'MagnitudeSlopeOffsetPhaseDelay'
 
     def set_transforms(self, transforms: List[Tuple[str, str, Callable]]):
         """Update available transforms."""
@@ -2186,6 +2279,10 @@ class PlotWidget1D(QWidget):
         self._fit_x_data = None  # x data used for fit
         self._fit_y_data = None  # y data used for fit
         
+        # Argand mode state
+        self._argand_mode = False
+        self._resonator_fitter = None  # Stores resonator.LinearShuntFitter object
+        
         # Connect mouse events for zoom
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
@@ -2687,7 +2784,40 @@ class PlotWidget1D(QWidget):
     
     def _draw_fit_curve(self):
         """Draw fit curve on the plot."""
-        if self._fit_result is None or not self._show_fit:
+        if not self._show_fit:
+            return
+        
+        # Argand mode: draw resonator fit
+        if self._argand_mode and self._resonator_fitter is not None:
+            # Generate fit curve from resonator model using lmfit's eval
+            freq = self.xs
+            # Use the model's eval method with fitted parameters
+            fit_s21 = self._resonator_fitter.model.eval(
+                params=self._resonator_fitter.result.params,
+                frequency=freq
+            )
+            
+            # Plot the fitted circle
+            self.ax.plot(np.real(fit_s21), np.imag(fit_s21),
+                         color=self.settings.fit_color,
+                         linestyle=self.settings.fit_line_style,
+                         linewidth=self.settings.fit_line_width,
+                         label='Fit', zorder=10)
+            
+            # Mark the resonance frequency point
+            f_r = self._resonator_fitter.resonance_frequency
+            s21_at_resonance = self._resonator_fitter.model.eval(
+                params=self._resonator_fitter.result.params,
+                frequency=np.array([f_r])
+            )
+            self.ax.plot(np.real(s21_at_resonance), np.imag(s21_at_resonance),
+                         'o', color=self.settings.fit_color,
+                         markersize=8, markeredgecolor='white',
+                         markeredgewidth=1.5, zorder=11)
+            return
+        
+        # Normal mode: draw standard fit
+        if self._fit_result is None:
             return
         
         model = FIT_MODELS[self._fit_result.model_name]
@@ -2703,6 +2833,99 @@ class PlotWidget1D(QWidget):
                      linestyle=self.settings.fit_line_style,
                      linewidth=self.settings.fit_line_width, 
                      label='Fit', zorder=10)
+
+    def set_argand_mode(self, enabled: bool):
+        """Enable or disable Argand (complex plane) plotting mode."""
+        if self._argand_mode != enabled:
+            self._argand_mode = enabled
+            # Reset zoom when switching modes (axis meaning changes)
+            self._xlim = None
+            self._ylim = None
+            # Reset full limits - they'll be recalculated in update_plot
+            self._full_xlim = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
+            self._full_ylim = None  # Will be computed from data
+            # Clear fits when switching modes
+            self.clear_fit()
+            self._resonator_fitter = None
+            # Clear callouts (they have different meaning in each mode)
+            self._callouts = []
+            self._delta_callouts = []
+            self._delta_callout_first_point = None
+            self.update_plot()
+    
+    def fit_resonator(self, background_model: str = 'MagnitudeSlopeOffsetPhaseDelay',
+                      visible_only: bool = False) -> Tuple[float, float, float, float]:
+        """
+        Fit resonator data using the resonator package.
+        
+        Args:
+            background_model: Name of background model to use
+            visible_only: If True, fit only visible frequency range
+            
+        Returns:
+            Tuple of (f_r, Q_i, Q_c, Q_t)
+            
+        Raises:
+            ImportError: If resonator package not installed
+            ValueError: If fit fails
+        """
+        if not HAS_RESONATOR:
+            raise ImportError("resonator package not installed. Install with: pip install resonator")
+        
+        # Get frequency and complex data
+        freq = self.xs.copy()
+        data = self.data_source.get_data()
+        
+        # Apply S21 rotation if enabled
+        if self._rotate_s21:
+            data = rotate_s21(data)
+        
+        # Filter to visible range if requested
+        if visible_only and self._xlim is not None:
+            x_min, x_max = min(self._xlim), max(self._xlim)
+            mask = (freq >= x_min) & (freq <= x_max)
+            freq = freq[mask]
+            data = data[mask]
+        
+        # Remove NaN values
+        valid_mask = ~np.isnan(data)
+        freq = freq[valid_mask]
+        data = data[valid_mask]
+        
+        if len(freq) < 10:
+            raise ValueError("Not enough data points for resonator fit")
+        
+        # Use MagnitudeSlopeOffsetPhaseDelay - the most comprehensive background model
+        # Dynamically get the class to avoid AttributeError if module structure differs
+        try:
+            bg_class = getattr(resonator_background, 'MagnitudeSlopeOffsetPhaseDelay')
+        except AttributeError:
+            raise ValueError("MagnitudeSlopeOffsetPhaseDelay not found in resonator.background module")
+        
+        try:
+            self._resonator_fitter = shunt.LinearShuntFitter(
+                frequency=freq,
+                data=data,
+                background_model=bg_class()
+            )
+            
+            f_r = self._resonator_fitter.resonance_frequency
+            Q_i = self._resonator_fitter.Q_i
+            Q_c = self._resonator_fitter.Q_c
+            Q_t = self._resonator_fitter.Q_t
+            
+            self.update_plot()
+            
+            return (f_r, Q_i, Q_c, Q_t)
+            
+        except Exception as e:
+            self._resonator_fitter = None
+            raise ValueError(f"Resonator fit failed: {str(e)}")
+    
+    def clear_resonator_fit(self):
+        """Clear resonator fit result."""
+        self._resonator_fitter = None
+        self.update_plot()
 
     def set_transform(self, index: int):
         self._current_transform = index
@@ -2724,54 +2947,98 @@ class PlotWidget1D(QWidget):
             if self._rotate_s21:
                 data = rotate_s21(data)
 
-            try:
-                zs = transform(data)
-            except Exception as e:
-                print(f"Transform error: {e}")
-                zs = np.abs(data)
-
-            # Convert Inf to NaN (matplotlib will skip NaN values in line plots)
-            zs = np.where(np.isinf(zs), np.nan, zs)
-            
-            # Compute full y limits from data (ignoring NaN)
-            valid_zs = zs[~np.isnan(zs)]
-            if len(valid_zs) > 0:
-                data_ymin = float(np.min(valid_zs))
-                data_ymax = float(np.max(valid_zs))
-                # Add padding to y limits
-                y_range = data_ymax - data_ymin
-                if y_range > 0:
-                    padding = y_range * self.settings.y_padding
+            # Check if Argand mode (complex plane plot)
+            if self._argand_mode:
+                # Argand plane: plot Re vs Im
+                plot_x = np.real(data)
+                plot_y = np.imag(data)
+                
+                # Convert Inf to NaN
+                plot_x = np.where(np.isinf(plot_x), np.nan, plot_x)
+                plot_y = np.where(np.isinf(plot_y), np.nan, plot_y)
+                
+                # Determine axis labels based on experiment type
+                exp_type = self.data_source.spec.exp_type
+                if exp_type in (ExperimentType.RFSOC_1D, ExperimentType.RFSOC_2D):
+                    x_label_default = 'I (a.u.)'
+                    y_label_default = 'Q (a.u.)'
                 else:
-                    padding = abs(data_ymax) * self.settings.y_padding if data_ymax != 0 else 0.1
-                data_ylim = (data_ymin - padding, data_ymax + padding)
-            else:
-                data_ylim = (0, 1)
-            
-            # Update _full_ylim if not interchanged, else it holds x range
-            if not self._interchanged:
-                self._full_ylim = data_ylim
-            
-            # Determine what to plot based on interchange state
-            if self._interchanged:
-                # Swapped: Y-axis shows xs (independent), X-axis shows zs (dependent)
-                plot_x = zs
-                plot_y = self.xs
-                x_label_default = ylabel  # Transform label on X
-                y_label_default = self.data_source.spec.x_label  # Original X label on Y
+                    x_label_default = 'Re[S21]'
+                    y_label_default = 'Im[S21]'
                 
-                # When interchanged, x limits come from data range, y limits from xs
-                x_full = data_ylim
-                y_full = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
-            else:
-                # Normal: X-axis shows xs, Y-axis shows zs
-                plot_x = self.xs
-                plot_y = zs
-                x_label_default = self.data_source.spec.x_label
-                y_label_default = ylabel
+                # Compute limits with padding
+                valid_x = plot_x[~np.isnan(plot_x)]
+                valid_y = plot_y[~np.isnan(plot_y)]
                 
-                x_full = self._full_xlim
-                y_full = data_ylim
+                if len(valid_x) > 0 and len(valid_y) > 0:
+                    x_min, x_max = float(np.min(valid_x)), float(np.max(valid_x))
+                    y_min, y_max = float(np.min(valid_y)), float(np.max(valid_y))
+                    
+                    x_range = x_max - x_min
+                    y_range = y_max - y_min
+                    
+                    x_padding = x_range * self.settings.y_padding if x_range > 0 else 0.1
+                    y_padding = y_range * self.settings.y_padding if y_range > 0 else 0.1
+                    
+                    x_full = (x_min - x_padding, x_max + x_padding)
+                    y_full = (y_min - y_padding, y_max + y_padding)
+                else:
+                    x_full = (-1, 1)
+                    y_full = (-1, 1)
+                
+                # Store for zoom reset
+                self._full_xlim = x_full
+                self._full_ylim = y_full
+            else:
+                # Normal transform plot
+                try:
+                    zs = transform(data)
+                except Exception as e:
+                    print(f"Transform error: {e}")
+                    zs = np.abs(data)
+
+                # Convert Inf to NaN (matplotlib will skip NaN values in line plots)
+                zs = np.where(np.isinf(zs), np.nan, zs)
+                
+                # Compute full y limits from data (ignoring NaN)
+                valid_zs = zs[~np.isnan(zs)]
+                if len(valid_zs) > 0:
+                    data_ymin = float(np.min(valid_zs))
+                    data_ymax = float(np.max(valid_zs))
+                    # Add padding to y limits
+                    y_range = data_ymax - data_ymin
+                    if y_range > 0:
+                        padding = y_range * self.settings.y_padding
+                    else:
+                        padding = abs(data_ymax) * self.settings.y_padding if data_ymax != 0 else 0.1
+                    data_ylim = (data_ymin - padding, data_ymax + padding)
+                else:
+                    data_ylim = (0, 1)
+                
+                # Update _full_ylim if not interchanged, else it holds x range
+                if not self._interchanged:
+                    self._full_ylim = data_ylim
+                
+                # Determine what to plot based on interchange state
+                if self._interchanged:
+                    # Swapped: Y-axis shows xs (independent), X-axis shows zs (dependent)
+                    plot_x = zs
+                    plot_y = self.xs
+                    x_label_default = ylabel  # Transform label on X
+                    y_label_default = self.data_source.spec.x_label  # Original X label on Y
+                    
+                    # When interchanged, x limits come from data range, y limits from xs
+                    x_full = data_ylim
+                    y_full = (self.xs[0], self.xs[-1]) if len(self.xs) > 1 else (0, 1)
+                else:
+                    # Normal: X-axis shows xs, Y-axis shows zs
+                    plot_x = self.xs
+                    plot_y = zs
+                    x_label_default = self.data_source.spec.x_label
+                    y_label_default = ylabel
+                    
+                    x_full = self._full_xlim
+                    y_full = data_ylim
 
             # Build marker kwargs
             marker_kwargs = {}
@@ -2807,6 +3074,13 @@ class PlotWidget1D(QWidget):
             if self.settings.y_tick_count > 0:
                 from matplotlib.ticker import MaxNLocator
                 self.ax.yaxis.set_major_locator(MaxNLocator(nbins=self.settings.y_tick_count))
+            
+            # Set aspect ratio BEFORE applying limits
+            # For Argand plots, equal aspect makes circles look like circles
+            if self._argand_mode:
+                self.ax.set_aspect('equal', adjustable='box')
+            else:
+                self.ax.set_aspect('auto')
             
             # Apply X limits with flip consideration
             if self._xlim is not None:
@@ -2923,6 +3197,20 @@ class PlotWidget1D(QWidget):
             self._draw_fit_curve()
 
             self.figure.tight_layout()
+            
+            # For Argand mode, reapply limits after tight_layout since it can affect them
+            if self._argand_mode:
+                if self._xlim is not None:
+                    if self._x_flipped:
+                        self.ax.set_xlim(self._xlim[1], self._xlim[0])
+                    else:
+                        self.ax.set_xlim(self._xlim[0], self._xlim[1])
+                if self._ylim is not None:
+                    if self._y_flipped:
+                        self.ax.set_ylim(self._ylim[1], self._ylim[0])
+                    else:
+                        self.ax.set_ylim(self._ylim[0], self._ylim[1])
+            
             self.canvas.draw()
         except Exception as e:
             print(f"Plot update error: {e}")
@@ -3006,6 +3294,10 @@ class PlotWidget2D(QWidget):
         self._show_residuals = False
         self._fit_x_data = None  # x data used for fit
         self._fit_y_data = None  # y data used for fit
+        
+        # Argand mode state
+        self._argand_mode = False
+        self._resonator_fitter = None  # Stores resonator.LinearShuntFitter object
 
         # Initialize axes (will be configured in _setup_axes)
         self.ax_2d = None
@@ -3193,6 +3485,7 @@ class PlotWidget2D(QWidget):
         self._fit_line = None
         self._fit_x_data = None
         self._fit_y_data = None
+        self._resonator_fitter = None  # Also clear resonator fit
         self.update_plot()
 
     def _on_resize(self, event):
@@ -3857,10 +4150,42 @@ class PlotWidget2D(QWidget):
     
     def _draw_fit_curve(self):
         """Draw fit curve on the horizontal linecut plot."""
-        if self._fit_result is None or not self._show_fit:
+        if not self._show_fit:
             return
         
         if not self._show_linecuts or self.ax_xcut is None:
+            return
+        
+        # Argand mode: draw resonator fit
+        if self._argand_mode and self._resonator_fitter is not None:
+            # Generate fit curve from resonator model using lmfit's eval
+            freq = self.xs
+            fit_s21 = self._resonator_fitter.model.eval(
+                params=self._resonator_fitter.result.params,
+                frequency=freq
+            )
+            
+            # Plot the fitted circle
+            self.ax_xcut.plot(np.real(fit_s21), np.imag(fit_s21),
+                              color=self.settings.fit_color,
+                              linestyle=self.settings.fit_line_style,
+                              linewidth=self.settings.fit_line_width,
+                              label='Fit', zorder=10)
+            
+            # Mark the resonance frequency point
+            f_r = self._resonator_fitter.resonance_frequency
+            s21_at_resonance = self._resonator_fitter.model.eval(
+                params=self._resonator_fitter.result.params,
+                frequency=np.array([f_r])
+            )
+            self.ax_xcut.plot(np.real(s21_at_resonance), np.imag(s21_at_resonance),
+                              'o', color=self.settings.fit_color,
+                              markersize=8, markeredgecolor='white',
+                              markeredgewidth=1.5, zorder=11)
+            return
+        
+        # Normal mode: draw standard fit
+        if self._fit_result is None:
             return
         
         model = FIT_MODELS[self._fit_result.model_name]
@@ -3876,6 +4201,101 @@ class PlotWidget2D(QWidget):
                           linestyle=self.settings.fit_line_style,
                           linewidth=self.settings.fit_line_width, 
                           label='Fit', zorder=10)
+
+    def set_argand_mode(self, enabled: bool):
+        """Enable or disable Argand (complex plane) plotting mode for linecut."""
+        if self._argand_mode != enabled:
+            self._argand_mode = enabled
+            # Clear fits when switching modes
+            self.clear_fit()
+            self._resonator_fitter = None
+            self.update_plot()
+    
+    def fit_resonator(self, background_model: str = 'MagnitudeSlopeOffsetPhaseDelay',
+                      visible_only: bool = False) -> Tuple[float, float, float, float]:
+        """
+        Fit resonator data using the resonator package.
+        
+        Args:
+            background_model: Name of background model to use
+            visible_only: If True, fit only visible frequency range
+            
+        Returns:
+            Tuple of (f_r, Q_i, Q_c, Q_t)
+            
+        Raises:
+            ImportError: If resonator package not installed
+            ValueError: If fit fails
+        """
+        if not HAS_RESONATOR:
+            raise ImportError("resonator package not installed. Install with: pip install resonator")
+        
+        if self._is_stitched:
+            raise ValueError("Resonator fitting not supported for stitched data")
+        
+        # Get frequency array and current slice complex data
+        raw_data = self.data_source.get_data()
+        
+        if self._rotate_s21:
+            raw_data = rotate_s21(raw_data)
+        
+        # Transpose if interchanged
+        if self._interchanged:
+            raw_data = raw_data.T
+        
+        # Get horizontal slice at current slider position
+        y_idx = int(self.slider_y.value())
+        y_idx = max(0, min(y_idx, raw_data.shape[0] - 1))
+        
+        freq = self.xs.copy()
+        data = raw_data[y_idx, :]
+        
+        # Filter to visible range if requested
+        if visible_only and self._xlim is not None:
+            x_min, x_max = min(self._xlim), max(self._xlim)
+            mask = (freq >= x_min) & (freq <= x_max)
+            freq = freq[mask]
+            data = data[mask]
+        
+        # Remove NaN values
+        valid_mask = ~np.isnan(data)
+        freq = freq[valid_mask]
+        data = data[valid_mask]
+        
+        if len(freq) < 10:
+            raise ValueError("Not enough data points for resonator fit")
+        
+        # Use MagnitudeSlopeOffsetPhaseDelay - the most comprehensive background model
+        # Dynamically get the class to avoid AttributeError if module structure differs
+        try:
+            bg_class = getattr(resonator_background, 'MagnitudeSlopeOffsetPhaseDelay')
+        except AttributeError:
+            raise ValueError("MagnitudeSlopeOffsetPhaseDelay not found in resonator.background module")
+        
+        try:
+            self._resonator_fitter = shunt.LinearShuntFitter(
+                frequency=freq,
+                data=data,
+                background_model=bg_class()
+            )
+            
+            f_r = self._resonator_fitter.resonance_frequency
+            Q_i = self._resonator_fitter.Q_i
+            Q_c = self._resonator_fitter.Q_c
+            Q_t = self._resonator_fitter.Q_t
+            
+            self.update_plot()
+            
+            return (f_r, Q_i, Q_c, Q_t)
+            
+        except Exception as e:
+            self._resonator_fitter = None
+            raise ValueError(f"Resonator fit failed: {str(e)}")
+    
+    def clear_resonator_fit(self):
+        """Clear resonator fit result."""
+        self._resonator_fitter = None
+        self.update_plot()
 
     def set_transform(self, index: int):
         self._current_transform = index
@@ -4143,28 +4563,68 @@ class PlotWidget2D(QWidget):
 
                 # X cut - shows horizontal slice at fixed Y value
                 if zs.ndim > 1 and zs.shape[0] > y_idx:
-                    self.ax_xcut.plot(self.xs, zs[y_idx], color=self.settings.line_color,
-                                      linewidth=self.settings.line_width, **marker_kwargs)
-                    # Format title with 3 decimal places in scientific notation
-                    y_val = self.ys[y_idx]
-                    if abs(y_val) >= 1e4 or (abs(y_val) < 1e-2 and y_val != 0):
-                        y_val_str = f'{y_val:.3e}'
+                    if self._argand_mode:
+                        # Argand mode: plot Re vs Im for this slice
+                        # Get the raw complex data for this slice
+                        raw_data = self.data_source.get_data()
+                        if self._rotate_s21:
+                            raw_data = rotate_s21(raw_data)
+                        if self._interchanged:
+                            raw_data = raw_data.T
+                        slice_data = raw_data[y_idx, :]
+                        
+                        plot_re = np.real(slice_data)
+                        plot_im = np.imag(slice_data)
+                        
+                        self.ax_xcut.plot(plot_re, plot_im, color=self.settings.line_color,
+                                          linewidth=self.settings.line_width, **marker_kwargs)
+                        
+                        # Set labels for Argand plot
+                        exp_type = self.data_source.spec.exp_type
+                        if exp_type in (ExperimentType.RFSOC_1D, ExperimentType.RFSOC_2D):
+                            self.ax_xcut.set_xlabel('I (a.u.)', fontsize=self.settings.label_size)
+                            self.ax_xcut.set_ylabel('Q (a.u.)', fontsize=self.settings.label_size)
+                        else:
+                            self.ax_xcut.set_xlabel('Re[S21]', fontsize=self.settings.label_size)
+                            self.ax_xcut.set_ylabel('Im[S21]', fontsize=self.settings.label_size)
+                        
+                        # Format title with slice position
+                        y_val = self.ys[y_idx]
+                        if abs(y_val) >= 1e4 or (abs(y_val) < 1e-2 and y_val != 0):
+                            y_val_str = f'{y_val:.3e}'
+                        else:
+                            y_val_str = f'{y_val:.4g}'
+                        self.ax_xcut.set_title(f'{y_label} = {y_val_str}', fontsize=10)
+                        
+                        # Set equal aspect ratio for Argand plot
+                        # Use 'box' adjustable so it doesn't override manual limits
+                        self.ax_xcut.set_aspect('equal', adjustable='box')
                     else:
-                        y_val_str = f'{y_val:.4g}'
-                    self.ax_xcut.set_title(f'{y_label} = {y_val_str}', fontsize=10)
-                self.ax_xcut.set_xlabel(x_label, fontsize=self.settings.label_size)
-                self.ax_xcut.set_ylabel(ylabel, fontsize=self.settings.label_size)
-                # Apply x zoom/flip to x-cut
-                if self._xlim is not None:
-                    if self._x_flipped:
-                        self.ax_xcut.set_xlim(self._xlim[1], self._xlim[0])
-                    else:
-                        self.ax_xcut.set_xlim(self._xlim[0], self._xlim[1])
-                elif len(self.xs) > 1:
-                    if self._x_flipped:
-                        self.ax_xcut.set_xlim(self._full_xlim[1], self._full_xlim[0])
-                    else:
-                        self.ax_xcut.set_xlim(self._full_xlim[0], self._full_xlim[1])
+                        # Normal mode: plot transform vs frequency
+                        self.ax_xcut.plot(self.xs, zs[y_idx], color=self.settings.line_color,
+                                          linewidth=self.settings.line_width, **marker_kwargs)
+                        # Format title with 3 decimal places in scientific notation
+                        y_val = self.ys[y_idx]
+                        if abs(y_val) >= 1e4 or (abs(y_val) < 1e-2 and y_val != 0):
+                            y_val_str = f'{y_val:.3e}'
+                        else:
+                            y_val_str = f'{y_val:.4g}'
+                        self.ax_xcut.set_title(f'{y_label} = {y_val_str}', fontsize=10)
+                        self.ax_xcut.set_xlabel(x_label, fontsize=self.settings.label_size)
+                        self.ax_xcut.set_ylabel(ylabel, fontsize=self.settings.label_size)
+                        # Apply x zoom/flip to x-cut
+                        if self._xlim is not None:
+                            if self._x_flipped:
+                                self.ax_xcut.set_xlim(self._xlim[1], self._xlim[0])
+                            else:
+                                self.ax_xcut.set_xlim(self._xlim[0], self._xlim[1])
+                        elif len(self.xs) > 1:
+                            if self._x_flipped:
+                                self.ax_xcut.set_xlim(self._full_xlim[1], self._full_xlim[0])
+                            else:
+                                self.ax_xcut.set_xlim(self._full_xlim[0], self._full_xlim[1])
+                        self.ax_xcut.set_aspect('auto')
+                        
                 if self.settings.grid_enabled:
                     self.ax_xcut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
                 # Apply tick settings to linecut
@@ -4446,6 +4906,8 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('stitch_files', self._on_stitch_files)
         self.sidebar.set_callback('import_style', self._on_import_style)
         self.sidebar.set_callback('export_style', self._on_export_style)
+        # Argand mode callback
+        self.sidebar.set_callback('argand_toggled', self._on_argand_toggled)
         # Fitting callbacks
         self.sidebar.set_callback('fit_visible', self._on_fit_visible)
         self.sidebar.set_callback('fit_all', self._on_fit_all)
@@ -5111,25 +5573,60 @@ class Plotter(QMainWindow):
         if not self.plot_widget:
             return
         
-        # Get selected model and guesses
-        model_name = self.sidebar.fit_func_combo.currentText()
-        guesses = self.sidebar.get_fit_guesses()
-        
-        try:
-            result = self.plot_widget.fit_data(model_name, guesses, visible_only)
-            self.sidebar.show_fit_results(result)
-            # Store result for copy
-            self._current_fit_result = result
-        except ValueError as e:
-            self.sidebar.show_fit_error(str(e))
-            self._current_fit_result = None
+        # Check if in Argand mode
+        if self.sidebar._argand_mode:
+            # Resonator fitting
+            if not HAS_RESONATOR:
+                self.sidebar.show_fit_error("resonator package not installed")
+                return
+            
+            bg_model = self.sidebar.get_background_model()
+            
+            try:
+                f_r, Q_i, Q_c, Q_t = self.plot_widget.fit_resonator(bg_model, visible_only)
+                
+                # Get frequency unit from axis label
+                freq_unit = 'Hz'
+                if hasattr(self.plot_widget.data_source, 'spec'):
+                    x_label = self.plot_widget.data_source.spec.x_label
+                    unit = parse_unit(x_label)
+                    if unit:
+                        freq_unit = unit
+                
+                self.sidebar.show_resonator_results(f_r, Q_i, Q_c, Q_t, freq_unit)
+                # Store for copy
+                self._current_resonator_result = {
+                    'f_r': f_r, 'Q_i': Q_i, 'Q_c': Q_c, 'Q_t': Q_t,
+                    'freq_unit': freq_unit
+                }
+                self._current_fit_result = None
+            except (ImportError, ValueError) as e:
+                self.sidebar.show_fit_error(str(e))
+                self._current_resonator_result = None
+        else:
+            # Standard fitting
+            model_name = self.sidebar.fit_func_combo.currentText()
+            guesses = self.sidebar.get_fit_guesses()
+            
+            try:
+                result = self.plot_widget.fit_data(model_name, guesses, visible_only)
+                self.sidebar.show_fit_results(result)
+                # Store result for copy
+                self._current_fit_result = result
+                self._current_resonator_result = None
+            except ValueError as e:
+                self.sidebar.show_fit_error(str(e))
+                self._current_fit_result = None
     
     def _on_fit_clear(self):
         """Clear fit results."""
         if self.plot_widget:
             self.plot_widget.clear_fit()
+            if hasattr(self.plot_widget, 'clear_resonator_fit'):
+                self.plot_widget.clear_resonator_fit()
         self.sidebar.clear_fit_display()
         self._current_fit_result = None
+        self._current_resonator_result = None
     
     def _on_show_fit_toggled(self, show: bool):
         """Toggle fit curve visibility."""
@@ -5146,8 +5643,34 @@ class Plotter(QMainWindow):
         # Clear current fit when function changes
         self._on_fit_clear()
     
+    def _on_argand_toggled(self, enabled: bool):
+        """Handle Argand mode toggle."""
+        # Update sidebar UI
+        self.sidebar.set_argand_mode(enabled)
+        
+        # Update plot widget
+        if self.plot_widget:
+            self.plot_widget.set_argand_mode(enabled)
+    
     def _on_copy_fit_results(self):
         """Copy fit results to clipboard."""
+        # Check for resonator results first
+        if hasattr(self, '_current_resonator_result') and self._current_resonator_result is not None:
+            result = self._current_resonator_result
+            lines = [
+                "Resonator Fit Results:",
+                "",
+                f"  f_r = {result['f_r']:.6e} {result['freq_unit']}",
+                f"  Q_i = {result['Q_i']:.0f}",
+                f"  Q_c = {result['Q_c']:.0f}",
+                f"  Q_t = {result['Q_t']:.0f}",
+            ]
+            text = "\n".join(lines)
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            return
+        
+        # Standard fit results
         if not hasattr(self, '_current_fit_result') or self._current_fit_result is None:
             return
         
@@ -5485,6 +6008,11 @@ class Plotter(QMainWindow):
         # Clear fit display (new file loaded)
         self.sidebar.clear_fit_display()
         self._current_fit_result = None
+        self._current_resonator_result = None
+        
+        # Sync Argand mode with sidebar state
+        if self.sidebar._argand_mode:
+            self.plot_widget.set_argand_mode(True)
         
         # Re-enable live updates (may have been disabled by stitched data)
         self.sidebar.live_checkbox.setEnabled(True)
