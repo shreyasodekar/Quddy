@@ -135,7 +135,7 @@ class PlotSettings:
     fit_color: str = '#d62728'  # Red
     fit_line_width: float = 1.5
     fit_line_style: str = '--'  # dashed
-    grid_enabled: bool = True
+    grid_enabled: bool = False
     grid_alpha: float = 0.3
     grid_width: float = 0.5
     autoscale: bool = True
@@ -489,6 +489,23 @@ class DataTransforms:
             ('Raw', 'Raw', lambda d: d),
         ]
 
+# Mapping from transform labels to Python code strings
+TRANSFORM_CODE_MAP = {
+    'S21 (dB)': '20 * np.log10(np.abs(data) + 1e-15)',
+    '∠S21 (deg)': 'np.angle(data, deg=True)',
+    'Re[S21]': 'np.real(data)',
+    'Im[S21]': 'np.imag(data)',
+    'Magnitude (a.u.)': 'np.abs(data)',
+    'Phase (deg)': 'np.angle(data, deg=True)',
+    'I': 'np.real(data)',
+    'Q': 'np.imag(data)',
+    'Magnitude': 'np.abs(data)',
+    'Magnitude (dB)': '20 * np.log10(np.abs(data) + 1e-15)',
+    'Real': 'np.real(data)',
+    'Imaginary': 'np.imag(data)',
+    'Raw': 'data',
+}
+
 
 def rotate_s21(data: np.ndarray) -> np.ndarray:
     """
@@ -506,6 +523,24 @@ def rotate_s21(data: np.ndarray) -> np.ndarray:
     if new_angle > 90 or new_angle < -90:
         rotated_data = rotated_data * np.exp(1j * np.pi)
     return rotated_data
+
+
+def normalize_complex(data: np.ndarray) -> np.ndarray:
+    """
+    Normalize complex data to (0,1) magnitude range while preserving phase.
+    
+    Scales the magnitude to [0, 1] range using min-max normalization,
+    while keeping the original phase of each data point.
+    """
+    mag = np.abs(data)
+    min_val = np.nanmin(mag)
+    max_val = np.nanmax(mag)
+    if max_val - min_val < 1e-15:
+        return data  # Avoid division by zero
+    # Scale factor for each point
+    normalized_mag = (mag - min_val) / (max_val - min_val)
+    # Preserve phase: multiply normalized magnitude by unit phasor
+    return normalized_mag * np.exp(1j * np.angle(data))
 
 
 class CollapsibleSection(QWidget):
@@ -637,6 +672,25 @@ class Sidebar(QWidget):
         # === Data Section ===
         data_section = CollapsibleSection("Data")
         
+        # Live update (at top for visibility)
+        self.live_checkbox = QCheckBox("Live Update")
+        self.live_checkbox.setChecked(False)
+        self.live_checkbox.toggled.connect(
+            lambda c: self._emit('live_toggled', c))
+        data_section.add_widget(self.live_checkbox)
+
+        # Update interval
+        interval_layout = QHBoxLayout()
+        interval_layout.addWidget(QLabel("Interval (ms):"))
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(100, 5000)
+        self.interval_spin.setValue(500)
+        self.interval_spin.setSingleStep(100)
+        self.interval_spin.valueChanged.connect(
+            lambda v: self._emit('interval_changed', v))
+        interval_layout.addWidget(self.interval_spin)
+        data_section.add_layout(interval_layout)
+
         # Transform selector
         transform_layout = QVBoxLayout()
         transform_layout.addWidget(QLabel("Transform:"))
@@ -660,24 +714,12 @@ class Sidebar(QWidget):
             lambda c: self._emit('rotate_s21_toggled', c))
         data_section.add_widget(self.rotate_s21_checkbox)
 
-        # Live update
-        self.live_checkbox = QCheckBox("Live Update")
-        self.live_checkbox.setChecked(False)
-        self.live_checkbox.toggled.connect(
-            lambda c: self._emit('live_toggled', c))
-        data_section.add_widget(self.live_checkbox)
-
-        # Update interval
-        interval_layout = QHBoxLayout()
-        interval_layout.addWidget(QLabel("Interval (ms):"))
-        self.interval_spin = QSpinBox()
-        self.interval_spin.setRange(100, 5000)
-        self.interval_spin.setValue(500)
-        self.interval_spin.setSingleStep(100)
-        self.interval_spin.valueChanged.connect(
-            lambda v: self._emit('interval_changed', v))
-        interval_layout.addWidget(self.interval_spin)
-        data_section.add_layout(interval_layout)
+        # Normalize checkbox
+        self.normalize_checkbox = QCheckBox("Normalize (0,1)")
+        self.normalize_checkbox.setToolTip("Normalize magnitude to (0,1) range while preserving phase")
+        self.normalize_checkbox.toggled.connect(
+            lambda c: self._emit('normalize_toggled', c))
+        data_section.add_widget(self.normalize_checkbox)
 
         # Stitch files button
         # Stitch and Overlay buttons side by side
@@ -1091,7 +1133,7 @@ class Sidebar(QWidget):
 
         # Show Grid
         self.grid_checkbox = QCheckBox("Show Grid")
-        self.grid_checkbox.setChecked(True)
+        self.grid_checkbox.setChecked(False)
         self.grid_checkbox.toggled.connect(self._on_grid_toggled)
         appearance_section.add_widget(self.grid_checkbox)
 
@@ -1451,6 +1493,11 @@ class Sidebar(QWidget):
         self.save_btn = QPushButton("💾 Save Figure...")
         self.save_btn.clicked.connect(lambda: self._emit('save_figure'))
         export_section.add_widget(self.save_btn)
+
+        self.copy_script_btn = QPushButton("📋 Copy Script")
+        self.copy_script_btn.setToolTip("Copy Python script to reproduce this plot (Ctrl+P)")
+        self.copy_script_btn.clicked.connect(lambda: self._emit('copy_script'))
+        export_section.add_widget(self.copy_script_btn)
 
         if HAS_WIN32:
             self.word_btn = QPushButton("📄 Send to Word")
@@ -2710,6 +2757,8 @@ class PlotWidget1D(QWidget):
         
         # Rotate S21 state
         self._rotate_s21 = False
+        self._normalize = False
+        self._cached_plot_data = None  # Cache for rotated/normalized data
         
         # Annotation lines storage - each entry is (value, color, linestyle, linewidth)
         self._vlines = []  # List of (x_value, color, linestyle, linewidth) tuples
@@ -2864,6 +2913,13 @@ class PlotWidget1D(QWidget):
     def set_rotate_s21(self, enabled: bool):
         """Enable or disable S21 rotation."""
         self._rotate_s21 = enabled
+        self.refresh_data()  # Recompute cached data with new rotation state
+        self.update_plot()
+
+    def set_normalize(self, enabled: bool):
+        """Enable or disable magnitude normalization to (0,1)."""
+        self._normalize = enabled
+        self.refresh_data()  # Recompute cached data with new normalization state
         self.update_plot()
 
     def add_vline(self, x_value: float, color: str = 'green', linestyle: str = '--', linewidth: float = 1.5):
@@ -2930,10 +2986,10 @@ class PlotWidget1D(QWidget):
             if event.xdata is not None:
                 # Find nearest data point
                 # Find nearest data point based on interchange state
-                data = self.data_source.get_data()
-                # Apply S21 rotation if enabled
-                if self._rotate_s21:
-                    data = rotate_s21(data)
+                # Use cached data (already rotated if enabled)
+                if self._cached_plot_data is None:
+                    self.refresh_data()
+                data = self._cached_plot_data
                 _, _, transform = self.transforms[self._current_transform]
                 try:
                     zs = transform(data)
@@ -2964,9 +3020,10 @@ class PlotWidget1D(QWidget):
         if self._delta_callout_mode and event.button == 1:
             if event.xdata is not None:
                 # Find nearest data point
-                data = self.data_source.get_data()
-                if self._rotate_s21:
-                    data = rotate_s21(data)
+                # Use cached data (already rotated if enabled)
+                if self._cached_plot_data is None:
+                    self.refresh_data()
+                data = self._cached_plot_data
                 _, _, transform = self.transforms[self._current_transform]
                 try:
                     zs = transform(data)
@@ -3007,11 +3064,10 @@ class PlotWidget1D(QWidget):
         # Callout mode hover (also works in delta callout mode)
         if (self._callout_mode or self._delta_callout_mode) and not self._zoom_mode:
             if event.inaxes == self.ax and event.xdata is not None:
-                # Get transformed data
-                data = self.data_source.get_data()
-                # Apply S21 rotation if enabled
-                if self._rotate_s21:
-                    data = rotate_s21(data)
+                # Get transformed data - use cache
+                if self._cached_plot_data is None:
+                    self.refresh_data()
+                data = self._cached_plot_data
                 _, _, transform = self.transforms[self._current_transform]
                 try:
                     zs = transform(data)
@@ -3156,12 +3212,11 @@ class PlotWidget1D(QWidget):
         Raises:
             ValueError: If fit fails
         """
-        # Get current data
+        # Get current data - use cache
         label, ylabel, transform = self.transforms[self._current_transform]
-        data = self.data_source.get_data()
-        
-        if self._rotate_s21:
-            data = rotate_s21(data)
+        if self._cached_plot_data is None:
+            self.refresh_data()
+        data = self._cached_plot_data
         
         try:
             y_data = transform(data)
@@ -3377,13 +3432,11 @@ class PlotWidget1D(QWidget):
         if not HAS_RESONATOR:
             raise ImportError("resonator package not installed. Install with: pip install resonator")
         
-        # Get frequency and complex data
+        # Get frequency and complex data - use cache
         freq = self.xs.copy()
-        data = self.data_source.get_data()
-        
-        # Apply S21 rotation if enabled
-        if self._rotate_s21:
-            data = rotate_s21(data)
+        if self._cached_plot_data is None:
+            self.refresh_data()
+        data = self._cached_plot_data.copy()  # Copy since we filter below
         
         # Filter to visible range if requested
         if visible_only and self._xlim is not None:
@@ -3441,16 +3494,25 @@ class PlotWidget1D(QWidget):
         self.settings = settings
         self.update_plot()
 
+    def refresh_data(self):
+        """Re-read data from source and apply rotation/normalization if enabled. Call this on data updates."""
+        data = self.data_source.get_data()
+        if self._rotate_s21:
+            data = rotate_s21(data)
+        if self._normalize:
+            data = normalize_complex(data)
+        self._cached_plot_data = data
+
     def update_plot(self):
         try:
             self.ax.clear()
 
             label, ylabel, transform = self.transforms[self._current_transform]
-            data = self.data_source.get_data()
             
-            # Apply S21 rotation if enabled
-            if self._rotate_s21:
-                data = rotate_s21(data)
+            # Use cached data (already rotated if enabled)
+            if self._cached_plot_data is None:
+                self.refresh_data()
+            data = self._cached_plot_data
 
             # Check if Argand mode (complex plane plot)
             if self._argand_mode:
@@ -3899,6 +3961,9 @@ class PlotWidget2D(QWidget):
         
         # Rotate S21 state
         self._rotate_s21 = False
+        self._normalize = False
+        self._cached_plot_data = None  # Cache for rotated/normalized data
+        self._cached_datasets = None   # Cache for rotated/normalized datasets (stitched mode)
         
         # Annotation lines storage - each entry is (value, color, linestyle, linewidth)
         self._vlines = []  # List of (x_value, color, linestyle, linewidth) tuples
@@ -4025,7 +4090,7 @@ class PlotWidget2D(QWidget):
         self.slider_y.setMinimum(0)
         self.slider_y.setMaximum(max(1, len(self.ys) - 1))
         self.slider_y.setValue(0)
-        self.slider_y.setInvertedAppearance(True)
+        self.slider_y.setInvertedAppearance(False)
         self.slider_y.setFixedWidth(20)
         self.slider_y.valueChanged.connect(self._on_slider_changed)
         self.slider_y.setStyleSheet(self._slider_style_v)
@@ -4196,6 +4261,8 @@ class PlotWidget2D(QWidget):
             # Also swap combined limits
             self.data_source._combined_xlim, self.data_source._combined_ylim = \
                 self.data_source._combined_ylim, self.data_source._combined_xlim
+            # Invalidate cache so it gets refreshed with swapped data
+            self._cached_datasets = None
         
         # Swap axis labels in spec (create a modified copy)
         spec = self.data_source.spec
@@ -4270,6 +4337,13 @@ class PlotWidget2D(QWidget):
     def set_rotate_s21(self, enabled: bool):
         """Enable or disable S21 rotation."""
         self._rotate_s21 = enabled
+        self.refresh_data()  # Recompute cached data with new rotation state
+        self.update_plot()
+
+    def set_normalize(self, enabled: bool):
+        """Enable or disable magnitude normalization to (0,1)."""
+        self._normalize = enabled
+        self.refresh_data()  # Recompute cached data with new normalization state
         self.update_plot()
 
     def add_vline(self, x_value: float, color: str = 'green', linestyle: str = '--', linewidth: float = 1.5):
@@ -4692,12 +4766,11 @@ class PlotWidget2D(QWidget):
         if self._is_stitched:
             raise ValueError("Fitting not supported for stitched data")
         
-        # Get current linecut data
+        # Get current linecut data - use cache
         label, ylabel, transform = self.transforms[self._current_transform]
-        data = self.data_source.get_data()
-        
-        if self._rotate_s21:
-            data = rotate_s21(data)
+        if self._cached_plot_data is None:
+            self.refresh_data()
+        data = self._cached_plot_data
         
         try:
             zs = transform(data)
@@ -4909,11 +4982,10 @@ class PlotWidget2D(QWidget):
         if self._is_stitched:
             raise ValueError("Resonator fitting not supported for stitched data")
         
-        # Get frequency array and current slice complex data
-        raw_data = self.data_source.get_data()
-        
-        if self._rotate_s21:
-            raw_data = rotate_s21(raw_data)
+        # Get frequency array and current slice complex data - use cache
+        if self._cached_plot_data is None:
+            self.refresh_data()
+        raw_data = self._cached_plot_data
         
         # Transpose if interchanged
         if self._interchanged:
@@ -4988,29 +5060,64 @@ class PlotWidget2D(QWidget):
             _, _, transform = self.transforms[self._current_transform]
             
             if self._is_stitched:
-                # Compute min/max across all datasets
+                # Ensure cache is populated
+                if self._cached_datasets is None:
+                    self.refresh_data()
+                # Compute min/max across all datasets using cache
                 all_mins = []
                 all_maxs = []
-                for xs, ys, data in self.data_source.get_visible_datasets():
-                    # Apply S21 rotation if enabled
-                    if self._rotate_s21:
-                        data = rotate_s21(data)
+                for xs, ys, data in self._cached_datasets:
                     zs = transform(data)
                     zs = np.where(np.isinf(zs), np.nan, zs)
+                    # Apply derivative if enabled
+                    if self._show_derivative:
+                        if self._derivative_smoothing > 0:
+                            from scipy.signal import savgol_filter
+                            window = self._derivative_smoothing
+                            if window % 2 == 0:
+                                window += 1
+                            if window > zs.shape[1]:
+                                window = zs.shape[1] if zs.shape[1] % 2 == 1 else zs.shape[1] - 1
+                            if window >= 3:
+                                dx = np.mean(np.abs(np.diff(xs)))
+                                if dx > 0:
+                                    zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                        else:
+                            zs = np.gradient(zs, xs, axis=1)
                     all_mins.append(float(np.nanmin(zs)))
                     all_maxs.append(float(np.nanmax(zs)))
                 return min(all_mins), max(all_maxs)
             else:
-                data = self.data_source.get_data()
-                # Apply S21 rotation if enabled
-                if self._rotate_s21:
-                    data = rotate_s21(data)
+                # Ensure cache is populated
+                if self._cached_plot_data is None:
+                    self.refresh_data()
+                data = self._cached_plot_data
                 zs = transform(data)
                 # Convert Inf to NaN, then use nanmin/nanmax to ignore NaN values
                 zs = np.where(np.isinf(zs), np.nan, zs)
                 return float(np.nanmin(zs)), float(np.nanmax(zs))
         except:
             return 0.0, 1.0
+
+    def refresh_data(self):
+        """Re-read data from source and apply rotation/normalization if enabled. Call this on data updates."""
+        if self._is_stitched:
+            # Cache all datasets with rotation/normalization applied (each file normalized individually)
+            self._cached_datasets = []
+            for xs, ys, data in self.data_source.get_visible_datasets():
+                if self._rotate_s21:
+                    data = rotate_s21(data)
+                if self._normalize:
+                    data = normalize_complex(data)
+                self._cached_datasets.append((xs, ys, data))
+        else:
+            # Single file mode
+            data = self.data_source.get_data()
+            if self._rotate_s21:
+                data = rotate_s21(data)
+            if self._normalize:
+                data = normalize_complex(data)
+            self._cached_plot_data = data
 
     def update_plot(self):
         try:
@@ -5046,6 +5153,10 @@ class PlotWidget2D(QWidget):
             
             if self._is_stitched:
                 # Stitched data: plot each dataset with separate pcolormesh calls
+                # Ensure cache is populated
+                if self._cached_datasets is None:
+                    self.refresh_data()
+                
                 # First compute global vmin/vmax across all datasets
                 vmin, vmax = self.get_current_data_range()
                 if not self.settings.autoscale:
@@ -5059,13 +5170,28 @@ class PlotWidget2D(QWidget):
                 if self.settings.norm_type == 'twoslope':
                     vcenter = self.settings.norm_vcenter
                     if vcenter is None:
-                        # Compute median across all datasets
+                        # Compute median across all datasets using cache
                         all_data = []
-                        for xs, ys, data in self.data_source.get_visible_datasets():
-                            if self._rotate_s21:
-                                data = rotate_s21(data)
+                        for xs, ys, data in self._cached_datasets:
                             try:
-                                all_data.append(transform(data).flatten())
+                                zs = transform(data)
+                                zs = np.where(np.isinf(zs), np.nan, zs)
+                                # Apply derivative if enabled
+                                if self._show_derivative:
+                                    if self._derivative_smoothing > 0:
+                                        from scipy.signal import savgol_filter
+                                        window = self._derivative_smoothing
+                                        if window % 2 == 0:
+                                            window += 1
+                                        if window > zs.shape[1]:
+                                            window = zs.shape[1] if zs.shape[1] % 2 == 1 else zs.shape[1] - 1
+                                        if window >= 3:
+                                            dx = np.mean(np.abs(np.diff(xs)))
+                                            if dx > 0:
+                                                zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                                    else:
+                                        zs = np.gradient(zs, xs, axis=1)
+                                all_data.append(zs.flatten())
                             except:
                                 all_data.append(np.abs(data).flatten())
                         vcenter = np.nanmedian(np.concatenate(all_data))
@@ -5077,10 +5203,8 @@ class PlotWidget2D(QWidget):
                     norm = Normalize(vmin=vmin, vmax=vmax)
                 
                 pcm = None
-                for xs, ys, data in self.data_source.get_visible_datasets():
-                    # Apply S21 rotation if enabled
-                    if self._rotate_s21:
-                        data = rotate_s21(data)
+                for xs, ys, data in self._cached_datasets:
+                    # Data is already rotated in cache
                     try:
                         zs = transform(data)
                     except Exception as e:
@@ -5090,14 +5214,34 @@ class PlotWidget2D(QWidget):
                     # Convert Inf to NaN
                     zs = np.where(np.isinf(zs), np.nan, zs)
                     
+                    # Apply derivative along x-axis if enabled
+                    if self._show_derivative:
+                        if self._derivative_smoothing > 0:
+                            from scipy.signal import savgol_filter
+                            window = self._derivative_smoothing
+                            if window % 2 == 0:
+                                window += 1
+                            if window > zs.shape[1]:
+                                window = zs.shape[1] if zs.shape[1] % 2 == 1 else zs.shape[1] - 1
+                            if window >= 3:
+                                dx = np.mean(np.abs(np.diff(xs)))
+                                if dx > 0:
+                                    zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                        else:
+                            zs = np.gradient(zs, xs, axis=1)
+                    
                     pcm = self.ax_2d.pcolormesh(xs, ys, zs,
                                                  cmap=self.settings.colormap, norm=norm)
+                
+                # Update ylabel for derivative (outside loop, applies to all)
+                if self._show_derivative:
+                    ylabel = f"d({ylabel})/d({self.data_source.spec.x_label})"
             else:
-                # Single dataset: original behavior
-                data = self.data_source.get_data()
-                # Apply S21 rotation if enabled
-                if self._rotate_s21:
-                    data = rotate_s21(data)
+                # Single dataset: use cached data
+                if self._cached_plot_data is None:
+                    self.refresh_data()
+                data = self._cached_plot_data
+                
                 try:
                     zs = transform(data)
                 except Exception as e:
@@ -5266,10 +5410,10 @@ class PlotWidget2D(QWidget):
                 if zs.ndim > 1 and zs.shape[0] > y_idx:
                     if self._argand_mode:
                         # Argand mode: plot Re vs Im for this slice
-                        # Get the raw complex data for this slice
-                        raw_data = self.data_source.get_data()
-                        if self._rotate_s21:
-                            raw_data = rotate_s21(raw_data)
+                        # Get the raw complex data for this slice - use cache
+                        if self._cached_plot_data is None:
+                            self.refresh_data()
+                        raw_data = self._cached_plot_data
                         if self._interchanged:
                             raw_data = raw_data.T
                         slice_data = raw_data[y_idx, :]
@@ -5550,6 +5694,10 @@ class Plotter(QMainWindow):
         self.export_shortcut = QShortcut(QKeySequence("Ctrl+E"), self)
         self.export_shortcut.activated.connect(self._save_figure)
         
+        # Ctrl+P - Copy Python script
+        self.copy_script_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
+        self.copy_script_shortcut.activated.connect(self._copy_script_to_clipboard)
+        
         # Ctrl+L - Toggle linecuts
         self.linecuts_shortcut = QShortcut(QKeySequence("Ctrl+L"), self)
         self.linecuts_shortcut.activated.connect(self._toggle_linecuts_shortcut)
@@ -5662,6 +5810,7 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('copy_metadata', self._copy_metadata_to_clipboard)
         self.sidebar.set_callback('copy_metadata_dict', self._copy_metadata_dict_to_clipboard)
         self.sidebar.set_callback('save_figure', self._save_figure)
+        self.sidebar.set_callback('copy_script', self._copy_script_to_clipboard)
         self.sidebar.set_callback('send_word', self._send_to_word)
         self.sidebar.set_callback('rescale', self._on_rescale)
         self.sidebar.set_callback('linecuts_toggled', self._on_linecuts_toggled)
@@ -5677,6 +5826,7 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('add_hline', self._on_add_hline)
         self.sidebar.set_callback('clear_lines', self._on_clear_lines)
         self.sidebar.set_callback('rotate_s21_toggled', self._on_rotate_s21_toggled)
+        self.sidebar.set_callback('normalize_toggled', self._on_normalize_toggled)
         self.sidebar.set_callback('change_figsize', self._on_change_figsize)
         self.sidebar.set_callback('set_limits', self._on_set_limits)
         self.sidebar.set_callback('stitch_files', self._on_stitch_files)
@@ -5756,6 +5906,7 @@ class Plotter(QMainWindow):
             ("Ctrl + C", "Copy figure to clipboard"),
             ("Ctrl + Shift + C", "Copy metadata"),
             ("Ctrl + E", "Export/Save figure"),
+            ("Ctrl + P", "Copy Python script"),
             ("Ctrl + Shift + E", "Export style"),
             ("Ctrl + T", "Import style"),
             ("Ctrl + L", "Toggle linecuts (2D only)"),
@@ -5877,6 +6028,11 @@ class Plotter(QMainWindow):
         """Toggle S21 rotation for data."""
         if self.plot_widget and hasattr(self.plot_widget, 'set_rotate_s21'):
             self.plot_widget.set_rotate_s21(enabled)
+
+    def _on_normalize_toggled(self, enabled: bool):
+        """Toggle magnitude normalization to (0,1)."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_normalize'):
+            self.plot_widget.set_normalize(enabled)
 
     def _on_add_vline(self):
         """Open dialog to add a vertical line."""
@@ -6340,6 +6496,7 @@ class Plotter(QMainWindow):
         if self.data_source and hasattr(self.data_source, 'set_visibility'):
             self.data_source.set_visibility(index, visible)
             if self.plot_widget:
+                self.plot_widget.refresh_data()  # Re-cache with new visibility
                 self.plot_widget.update_plot()
     
     def _on_remove_stitch_file(self, index: int):
@@ -6358,6 +6515,7 @@ class Plotter(QMainWindow):
             self.file_info_label.setText(self.data_source.file_info)
             self.sidebar.set_metadata(self.data_source.metadata_str)
             if self.plot_widget:
+                self.plot_widget.refresh_data()  # Re-cache after removal
                 self.plot_widget.update_plot()
     
     def _on_clear_stitch(self):
@@ -6385,6 +6543,8 @@ class Plotter(QMainWindow):
         self.sidebar.live_checkbox.setToolTip("")
         self.sidebar.linecuts_checkbox.setEnabled(True)
         self.sidebar.linecuts_checkbox.setToolTip("")
+        self.sidebar.argand_checkbox.setEnabled(True)
+        self.sidebar.argand_checkbox.setToolTip("Plot Re[S21] vs Im[S21] - useful for resonator visualization")
         
         # Show drop zone
         self.drop_label.show()
@@ -6453,6 +6613,7 @@ class Plotter(QMainWindow):
             self.plot_widget._full_ylim = ylim
             self.plot_widget._xlim = None  # Reset zoom to show all
             self.plot_widget._ylim = None
+            self.plot_widget.refresh_data()  # Re-cache with new files
             self.plot_widget.update_plot()
 
     def _on_export_style(self):
@@ -6712,6 +6873,13 @@ class Plotter(QMainWindow):
     
     def _on_argand_toggled(self, enabled: bool):
         """Handle Argand mode toggle."""
+        # Disable Argand in stitched mode
+        if enabled and self.data_source and hasattr(self.data_source, 'is_stitched') and self.data_source.is_stitched():
+            QMessageBox.information(self, "Argand Mode", 
+                "Argand mode is not available for stitched data.")
+            self.sidebar.argand_checkbox.setChecked(False)
+            return
+        
         # Update sidebar UI
         self.sidebar.set_argand_mode(enabled)
         
@@ -6859,6 +7027,11 @@ class Plotter(QMainWindow):
             self.sidebar.linecuts_checkbox.setEnabled(False)
             self.sidebar.linecuts_checkbox.setToolTip("Linecuts not available for stitched data")
             
+            # Disable Argand mode for stitched data
+            self.sidebar.argand_checkbox.setChecked(False)
+            self.sidebar.argand_checkbox.setEnabled(False)
+            self.sidebar.argand_checkbox.setToolTip("Argand mode not available for stitched data")
+            
             # Enable stitch mode (disables overlay button)
             self.sidebar.set_stitch_mode(True)
             
@@ -6934,6 +7107,7 @@ class Plotter(QMainWindow):
 
     def _update_plot(self):
         if self.plot_widget:
+            self.plot_widget.refresh_data()  # Re-read data on live update
             self.plot_widget.update_plot()
 
     def _get_figure(self) -> Optional[plt.Figure]:
@@ -7016,6 +7190,630 @@ class Plotter(QMainWindow):
             "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg)")
         if path:
             fig.savefig(path, dpi=150, bbox_inches='tight')
+
+    def _copy_script_to_clipboard(self):
+        """Generate and copy Python script to clipboard."""
+        if not self.plot_widget or not self.data_source:
+            QMessageBox.warning(self, "No Plot", "Please load a file first.")
+            return
+        
+        try:
+            script = self._generate_plot_script()
+            clipboard = QApplication.clipboard()
+            clipboard.setText(script)
+            # Brief visual feedback
+            self.statusBar().showMessage("Script copied to clipboard!", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Script Generation Error", f"Failed to generate script:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _generate_plot_script(self) -> str:
+        """Generate Python script to reproduce current plot."""
+        lines = []
+        pw = self.plot_widget
+        is_2d = hasattr(pw, 'ax_2d')
+        is_stitched = hasattr(self.data_source, 'is_stitched') and self.data_source.is_stitched()
+        
+        # Get current transform info
+        transform_label = pw.transforms[pw._current_transform][0]
+        transform_code = TRANSFORM_CODE_MAP.get(transform_label, 'np.abs(data)')
+        y_label_from_transform = pw.transforms[pw._current_transform][1]
+        
+        # Check what features are active
+        has_rotation = hasattr(pw, '_rotate_s21') and pw._rotate_s21
+        has_normalize = hasattr(pw, '_normalize') and pw._normalize
+        has_derivative = hasattr(pw, '_show_derivative') and pw._show_derivative
+        has_linecuts = is_2d and hasattr(pw, '_show_linecuts') and pw._show_linecuts
+        has_overlays = hasattr(pw, '_overlays') and pw._overlays and any(o.visible for o in pw._overlays)
+        has_callouts = hasattr(pw, '_callouts') and pw._callouts
+        has_delta_callouts = hasattr(pw, '_delta_callouts') and pw._delta_callouts
+        has_fit = hasattr(pw, '_show_fit') and pw._show_fit and hasattr(self, '_current_fit_result') and self._current_fit_result
+        has_argand = hasattr(pw, '_argand_mode') and pw._argand_mode
+        has_resonator_fit = has_argand and hasattr(pw, '_show_fit') and pw._show_fit and hasattr(self, '_current_resonator_result') and self._current_resonator_result
+        interchanged = hasattr(pw, '_interchanged') and pw._interchanged
+        x_flipped = hasattr(pw, '_x_flipped') and pw._x_flipped
+        y_flipped = hasattr(pw, '_y_flipped') and pw._y_flipped
+        
+        # === IMPORTS ===
+        lines.append("import numpy as np")
+        lines.append("import matplotlib.pyplot as plt")
+        lines.append("import h5py")
+        
+        if is_2d:
+            if self.settings.norm_type == 'power':
+                lines.append("from matplotlib.colors import PowerNorm")
+            elif self.settings.norm_type == 'twoslope':
+                lines.append("from matplotlib.colors import TwoSlopeNorm")
+            elif self.settings.norm_type == 'log':
+                lines.append("from matplotlib.colors import LogNorm")
+            else:
+                lines.append("from matplotlib.colors import Normalize")
+        
+        if has_derivative and hasattr(pw, '_derivative_smoothing') and pw._derivative_smoothing > 0:
+            lines.append("from scipy.signal import savgol_filter")
+        
+        if has_fit:
+            lines.append("from scipy.optimize import curve_fit")
+        
+        if has_linecuts or (has_argand and is_2d):
+            lines.append("from matplotlib.gridspec import GridSpec")
+        
+        if has_resonator_fit:
+            lines.append("from resonator import shunt, background")
+        
+        lines.append("")
+        
+        # === DATA LOADING ===
+        spec = self.data_source.spec
+        
+        if is_stitched:
+            # Stitched mode - list visible files
+            lines.append("# Stitched files")
+            lines.append("stitch_files = [")
+            for i, fpath in enumerate(self.data_source.file_paths):
+                if self.data_source.visibility[i]:
+                    lines.append(f"    r\"{fpath}\",")
+            lines.append("]")
+            lines.append("")
+            if has_rotation:
+                lines.append("# S21 rotation function")
+                lines.append("def rotate_s21(data):")
+                lines.append("    angles = np.linspace(0, 2 * np.pi, 1000)")
+                lines.append("    variances = [np.nanvar(np.imag(data * np.exp(-1j * angle))) for angle in angles]")
+                lines.append("    optimal_angle = angles[np.argmin(variances)]")
+                lines.append("    rotated_data = data * np.exp(-1j * optimal_angle)")
+                lines.append("    new_angle = np.angle(np.nanmean(rotated_data), deg=True)")
+                lines.append("    if new_angle > 90 or new_angle < -90:")
+                lines.append("        rotated_data = rotated_data * np.exp(1j * np.pi)")
+                lines.append("    return rotated_data")
+                lines.append("")
+            if has_normalize:
+                lines.append("# Normalization function")
+                lines.append("def normalize_complex(data):")
+                lines.append("    mag = np.abs(data)")
+                lines.append("    min_val = np.nanmin(mag)")
+                lines.append("    max_val = np.nanmax(mag)")
+                lines.append("    if max_val - min_val < 1e-15:")
+                lines.append("        return data")
+                lines.append("    normalized_mag = (mag - min_val) / (max_val - min_val)")
+                lines.append("    return normalized_mag * np.exp(1j * np.angle(data))")
+                lines.append("")
+            lines.append("datasets = []")
+            lines.append("for fpath in stitch_files:")
+            lines.append("    with h5py.File(fpath, 'r') as f:")
+            lines.append(f"        xs = f['{spec.x_key}'][:]")
+            lines.append(f"        ys = f['{spec.y_key}'][:]")
+            lines.append(f"        data = f['{spec.data_key}'][:]")
+            if has_rotation:
+                lines.append("    data = rotate_s21(data)")
+            if has_normalize:
+                lines.append("    data = normalize_complex(data)")
+            lines.append(f"    zs = {transform_code}")
+            if has_derivative:
+                lines.extend(self._generate_derivative_code("    ", "zs", "xs"))
+            lines.append("    datasets.append((xs, ys, zs))")
+            lines.append("")
+        else:
+            # Single file mode
+            lines.append("# Load data")
+            lines.append(f"with h5py.File(r\"{self.data_source.file_path}\", 'r') as f:")
+            lines.append(f"    xs = f['{spec.x_key}'][:]")
+            if is_2d:
+                lines.append(f"    ys = f['{spec.y_key}'][:]")
+            lines.append(f"    data = f['{spec.data_key}'][:]")
+            lines.append("")
+            
+            # Rotation
+            if has_rotation:
+                lines.append("# S21 rotation function")
+                lines.append("def rotate_s21(data):")
+                lines.append("    angles = np.linspace(0, 2 * np.pi, 1000)")
+                lines.append("    variances = [np.nanvar(np.imag(data * np.exp(-1j * angle))) for angle in angles]")
+                lines.append("    optimal_angle = angles[np.argmin(variances)]")
+                lines.append("    rotated_data = data * np.exp(-1j * optimal_angle)")
+                lines.append("    new_angle = np.angle(np.nanmean(rotated_data), deg=True)")
+                lines.append("    if new_angle > 90 or new_angle < -90:")
+                lines.append("        rotated_data = rotated_data * np.exp(1j * np.pi)")
+                lines.append("    return rotated_data")
+                lines.append("")
+                lines.append("data = rotate_s21(data)")
+                lines.append("")
+            
+            # Normalization
+            if has_normalize:
+                lines.append("# Normalization function")
+                lines.append("def normalize_complex(data):")
+                lines.append("    mag = np.abs(data)")
+                lines.append("    min_val = np.nanmin(mag)")
+                lines.append("    max_val = np.nanmax(mag)")
+                lines.append("    if max_val - min_val < 1e-15:")
+                lines.append("        return data")
+                lines.append("    normalized_mag = (mag - min_val) / (max_val - min_val)")
+                lines.append("    return normalized_mag * np.exp(1j * np.angle(data))")
+                lines.append("")
+                lines.append("data = normalize_complex(data)")
+                lines.append("")
+            
+            # Transform
+            lines.append("# Transform")
+            lines.append(f"zs = {transform_code}")
+            lines.append("")
+            
+            # Derivative (not applicable for Argand mode)
+            if has_derivative and not has_argand:
+                lines.append("# Derivative")
+                lines.extend(self._generate_derivative_code("", "zs", "xs"))
+                lines.append("")
+            
+            # Overlays loading (not applicable for Argand mode)
+            if has_overlays and not has_argand:
+                lines.append("# Load overlays")
+                for i, overlay in enumerate(pw._overlays):
+                    if not overlay.visible:
+                        continue
+                    lines.append(f"with h5py.File(r\"{overlay.source_path}\", 'r') as f:")
+                    lines.append(f"    overlay{i}_xs = f['{spec.x_key}'][:]")
+                    if overlay.is_2d:
+                        lines.append(f"    overlay{i}_ys = f['{spec.y_key}'][:]")
+                    lines.append(f"    overlay{i}_data = f['{spec.data_key}'][:]")
+                    if has_rotation:
+                        lines.append(f"overlay{i}_data = rotate_s21(overlay{i}_data)")
+                    if has_normalize:
+                        lines.append(f"overlay{i}_data = normalize_complex(overlay{i}_data)")
+                    lines.append(f"overlay{i}_zs = {transform_code.replace('data', f'overlay{i}_data')}")
+                    if has_derivative:
+                        lines.extend(self._generate_derivative_code("", f"overlay{i}_zs", f"overlay{i}_xs"))
+                lines.append("")
+        
+        # === FIGURE SETUP ===
+        fig_w = self.settings.fig_width
+        fig_h = self.settings.fig_height
+        
+        if has_argand and is_2d:
+            # Argand mode with 2D data: main pcolormesh + Argand linecut on right
+            lines.append("# Figure with Argand linecut")
+            lines.append(f"fig = plt.figure(figsize=({fig_w}, {fig_h}))")
+            lines.append("gs = GridSpec(1, 2, width_ratios=[3, 1], wspace=0.15)")
+            lines.append("ax_main = fig.add_subplot(gs[0, 0])")
+            lines.append("ax_argand = fig.add_subplot(gs[0, 1])")
+            lines.append("")
+        elif has_linecuts:
+            lines.append("# Figure with linecuts")
+            lines.append(f"fig = plt.figure(figsize=({fig_w}, {fig_h}))")
+            lines.append("gs = GridSpec(2, 2, width_ratios=[3, 1], height_ratios=[1, 3], hspace=0.05, wspace=0.05)")
+            lines.append("ax_main = fig.add_subplot(gs[1, 0])")
+            lines.append("ax_hcut = fig.add_subplot(gs[0, 0], sharex=ax_main)")
+            lines.append("ax_vcut = fig.add_subplot(gs[1, 1], sharey=ax_main)")
+            lines.append("ax_cbar = fig.add_subplot(gs[0, 1])")
+            lines.append("ax_cbar.axis('off')")
+            lines.append("")
+        else:
+            lines.append("# Figure setup")
+            lines.append(f"fig, ax = plt.subplots(figsize=({fig_w}, {fig_h}))")
+            lines.append("")
+        
+        ax_name = "ax_main" if (has_linecuts or (has_argand and is_2d)) else "ax"
+        
+        # === MAIN PLOT ===
+        if is_2d:
+            # Build norm string (includes vmin/vmax)
+            norm_str = self._generate_norm_code()
+            
+            if is_stitched:
+                lines.append("# Plot stitched data")
+                lines.append("for xs, ys, zs in datasets:")
+                if interchanged:
+                    lines.append(f"    im = {ax_name}.pcolormesh(ys, xs, zs.T, cmap='{self.settings.colormap}', norm={norm_str}, shading='auto')")
+                else:
+                    lines.append(f"    im = {ax_name}.pcolormesh(xs, ys, zs, cmap='{self.settings.colormap}', norm={norm_str}, shading='auto')")
+            else:
+                lines.append("# Main plot")
+                if interchanged:
+                    lines.append(f"im = {ax_name}.pcolormesh(ys, xs, zs.T, cmap='{self.settings.colormap}', norm={norm_str}, shading='auto')")
+                else:
+                    lines.append(f"im = {ax_name}.pcolormesh(xs, ys, zs, cmap='{self.settings.colormap}', norm={norm_str}, shading='auto')")
+            
+            # Colorbar
+            cbar_label = self.settings.z_label_text if self.settings.z_label_text else y_label_from_transform
+            cbar_label_escaped = cbar_label.replace("'", "\\'")
+            if has_linecuts:
+                lines.append(f"plt.colorbar(im, ax=ax_cbar, shrink={self.settings.cbar_shrink}, label='{cbar_label_escaped}')")
+            else:
+                lines.append(f"plt.colorbar(im, ax={ax_name}, shrink={self.settings.cbar_shrink}, label='{cbar_label_escaped}')")
+            lines.append("")
+            
+            # Argand linecut (for 2D Argand mode)
+            if has_argand:
+                h_idx = pw.slider_y.value() if hasattr(pw, 'slider_y') else 0
+                lines.append("# Argand linecut")
+                lines.append(f"h_idx = {h_idx}  # Cut index")
+                lines.append(f"cut_data = data[h_idx, :]")
+                lines.append(f"ax_argand.plot(cut_data.real, cut_data.imag, color='{self.settings.line_color}', linewidth={self.settings.line_width})")
+                lines.append(f"ax_main.axhline(ys[h_idx], color='gray', linestyle='--', alpha=0.5)")
+                lines.append("ax_argand.set_aspect('equal', adjustable='datalim')")
+                lines.append("ax_argand.set_xlabel('Re[S21]', fontsize=10)")
+                lines.append("ax_argand.set_ylabel('Im[S21]', fontsize=10)")
+                if self.settings.grid_enabled:
+                    lines.append(f"ax_argand.grid(True, alpha={self.settings.grid_alpha}, linewidth={self.settings.grid_width})")
+                
+                if has_resonator_fit:
+                    lines.append("")
+                    lines.append("# Resonator fit on Argand cut")
+                    lines.append("resonator = shunt.LinearShuntFitter(")
+                    lines.append("    frequency=xs,")
+                    lines.append("    data=cut_data,")
+                    lines.append("    background_model=background.MagnitudeSlopeOffsetPhaseDelay()")
+                    lines.append(")")
+                    lines.append("print(resonator.result.fit_report())")
+                    lines.append("")
+                    lines.append("# Plot fit curve")
+                    lines.append("fit_s21 = resonator.model.eval(params=resonator.result.params, frequency=xs)")
+                    lines.append(f"ax_argand.plot(np.real(fit_s21), np.imag(fit_s21), '{self.settings.fit_line_style}', color='{self.settings.fit_color}', linewidth={self.settings.fit_line_width}, label='Fit')")
+                    lines.append("")
+                    lines.append("# Mark resonance frequency")
+                    lines.append("f_r = resonator.resonance_frequency")
+                    lines.append("s21_at_resonance = resonator.model.eval(params=resonator.result.params, frequency=np.array([f_r]))")
+                    lines.append(f"ax_argand.plot(np.real(s21_at_resonance), np.imag(s21_at_resonance), 'o', color='{self.settings.fit_color}', markersize=8, markeredgecolor='white', markeredgewidth=1.5)")
+                lines.append("")
+            # Regular linecuts
+            elif has_linecuts:
+                h_idx = pw.slider_y.value() if hasattr(pw, 'slider_y') else 0
+                v_idx = pw.slider_x.value() if hasattr(pw, 'slider_x') else 0
+                lines.append("# Linecuts")
+                lines.append(f"h_idx = {h_idx}  # Horizontal cut index")
+                lines.append(f"v_idx = {v_idx}  # Vertical cut index")
+                if interchanged:
+                    lines.append(f"ax_hcut.plot(ys, zs[v_idx, :], color='{self.settings.line_color}', linewidth={self.settings.line_width})")
+                    lines.append(f"ax_vcut.plot(zs[:, h_idx], xs, color='{self.settings.line_color}', linewidth={self.settings.line_width})")
+                    lines.append(f"ax_main.axvline(ys[h_idx], color='gray', linestyle='--', alpha=0.5)")
+                    lines.append(f"ax_main.axhline(xs[v_idx], color='gray', linestyle='--', alpha=0.5)")
+                else:
+                    lines.append(f"ax_hcut.plot(xs, zs[h_idx, :], color='{self.settings.line_color}', linewidth={self.settings.line_width})")
+                    lines.append(f"ax_vcut.plot(zs[:, v_idx], ys, color='{self.settings.line_color}', linewidth={self.settings.line_width})")
+                    lines.append(f"ax_main.axhline(ys[h_idx], color='gray', linestyle='--', alpha=0.5)")
+                    lines.append(f"ax_main.axvline(xs[v_idx], color='gray', linestyle='--', alpha=0.5)")
+                lines.append("plt.setp(ax_hcut.get_xticklabels(), visible=False)")
+                lines.append("plt.setp(ax_vcut.get_yticklabels(), visible=False)")
+                
+                # Fit on horizontal linecut
+                if has_fit:
+                    lines.append("")
+                    lines.extend(self._generate_fit_code_2d_linecut(interchanged))
+                
+                lines.append("")
+        else:
+            # 1D plot or Argand mode
+            if has_argand:
+                # Argand plane plot (Re vs Im)
+                lines.append("# Argand plane plot")
+                lines.append("plot_x = np.real(data)")
+                lines.append("plot_y = np.imag(data)")
+                marker = f", marker='{self.settings.marker_style}', markersize={self.settings.marker_size}" if self.settings.marker_style.lower() != 'none' else ""
+                lines.append(f"{ax_name}.plot(plot_x, plot_y, color='{self.settings.line_color}', linewidth={self.settings.line_width}{marker})")
+                
+                if has_resonator_fit:
+                    lines.append("")
+                    lines.append("# Resonator fit")
+                    lines.append("resonator = shunt.LinearShuntFitter(")
+                    lines.append("    frequency=xs,")
+                    lines.append("    data=data,")
+                    lines.append("    background_model=background.MagnitudeSlopeOffsetPhaseDelay()")
+                    lines.append(")")
+                    lines.append("print(resonator.result.fit_report())")
+                    lines.append("")
+                    lines.append("# Plot fit curve")
+                    lines.append("fit_s21 = resonator.model.eval(params=resonator.result.params, frequency=xs)")
+                    lines.append(f"{ax_name}.plot(np.real(fit_s21), np.imag(fit_s21), '{self.settings.fit_line_style}', color='{self.settings.fit_color}', linewidth={self.settings.fit_line_width}, label='Fit')")
+                    lines.append("")
+                    lines.append("# Mark resonance frequency")
+                    lines.append("f_r = resonator.resonance_frequency")
+                    lines.append("s21_at_resonance = resonator.model.eval(params=resonator.result.params, frequency=np.array([f_r]))")
+                    lines.append(f"{ax_name}.plot(np.real(s21_at_resonance), np.imag(s21_at_resonance), 'o', color='{self.settings.fit_color}', markersize=8, markeredgecolor='white', markeredgewidth=1.5)")
+                lines.append("")
+            else:
+                lines.append("# Main plot")
+                marker = f", marker='{self.settings.marker_style}', markersize={self.settings.marker_size}" if self.settings.marker_style.lower() != 'none' else ""
+                if interchanged:
+                    lines.append(f"{ax_name}.plot(zs, xs, color='{self.settings.line_color}', linewidth={self.settings.line_width}{marker})")
+                else:
+                    lines.append(f"{ax_name}.plot(xs, zs, color='{self.settings.line_color}', linewidth={self.settings.line_width}{marker})")
+                
+                # Overlays
+                if has_overlays:
+                    lines.append("")
+                    lines.append("# Overlays")
+                    for i, overlay in enumerate(pw._overlays):
+                        if not overlay.visible:
+                            continue
+                        if interchanged:
+                            lines.append(f"{ax_name}.plot(overlay{i}_zs, overlay{i}_xs, color='{overlay.color}', linewidth={self.settings.line_width}, alpha=0.8)")
+                        else:
+                            lines.append(f"{ax_name}.plot(overlay{i}_xs, overlay{i}_zs, color='{overlay.color}', linewidth={self.settings.line_width}, alpha=0.8)")
+            lines.append("")
+        
+        # === FIT ===
+        if has_fit and not is_2d and not has_argand:
+            lines.extend(self._generate_fit_code(ax_name))
+            lines.append("")
+        
+        # === CALLOUTS ===
+        if has_callouts:
+            lines.append("# Callouts")
+            for x, y, z in pw._callouts:
+                if is_2d:
+                    lines.append(f"{ax_name}.plot({x}, {y}, 'o', color='black', markersize=6)")
+                    lines.append(f"{ax_name}.annotate(f'({x:.4g}, {y:.4g}, {z:.4g})', xy=({x}, {y}), xytext=(10, 10), textcoords='offset points', fontsize=9, bbox=dict(boxstyle='round', fc='white', alpha=0.8))")
+                else:
+                    plot_x, plot_y = (z, x) if interchanged else (x, z)
+                    lines.append(f"{ax_name}.plot({plot_x}, {plot_y}, 'o', color='black', markersize=6)")
+                    lines.append(f"{ax_name}.annotate(f'({x:.4g}, {z:.4g})', xy=({plot_x}, {plot_y}), xytext=(10, 10), textcoords='offset points', fontsize=9, bbox=dict(boxstyle='round', fc='white', alpha=0.8))")
+            lines.append("")
+        
+        if has_delta_callouts:
+            lines.append("# Delta callouts")
+            for (x1, y1, z1), (x2, y2, z2) in pw._delta_callouts:
+                dx = abs(x2 - x1)
+                if is_2d:
+                    dy = abs(y2 - y1)
+                    dz = abs(z2 - z1)
+                    lines.append(f"{ax_name}.plot([{x1}, {x2}], [{y1}, {y2}], 'o--', color='gray', markersize=6)")
+                    mid_x, mid_y = (x1 + x2) / 2, (y1 + y2) / 2
+                    lines.append(f"{ax_name}.annotate(f'Δx={dx:.4g}, Δy={dy:.4g}, Δz={dz:.4g}', xy=({mid_x}, {mid_y}), fontsize=9, bbox=dict(boxstyle='round', fc='lightyellow', alpha=0.8))")
+                else:
+                    dz = abs(z2 - z1)
+                    if interchanged:
+                        lines.append(f"{ax_name}.plot([{z1}, {z2}], [{x1}, {x2}], 'o--', color='gray', markersize=6)")
+                        lines.append(f"{ax_name}.annotate(f'Δx={dx:.4g}, Δz={dz:.4g}', xy=({(z1+z2)/2}, {(x1+x2)/2}), fontsize=9, bbox=dict(boxstyle='round', fc='lightyellow', alpha=0.8))")
+                    else:
+                        lines.append(f"{ax_name}.plot([{x1}, {x2}], [{z1}, {z2}], 'o--', color='gray', markersize=6)")
+                        lines.append(f"{ax_name}.annotate(f'Δx={dx:.4g}, Δz={dz:.4g}', xy=({(x1+x2)/2}, {(z1+z2)/2}), fontsize=9, bbox=dict(boxstyle='round', fc='lightyellow', alpha=0.8))")
+            lines.append("")
+        
+        # === APPEARANCE ===
+        lines.append("# Appearance")
+        
+        # Labels
+        if has_argand and not is_2d:
+            # 1D Argand mode labels (pure Argand plot)
+            x_label = self.settings.x_label_text if self.settings.x_label_text else 'Re[S21]'
+            y_label = self.settings.y_label_text if self.settings.y_label_text else 'Im[S21]'
+        else:
+            # Normal mode or 2D Argand (main plot is pcolormesh)
+            x_label = self.settings.x_label_text if self.settings.x_label_text else spec.x_label
+            if is_2d:
+                y_label = self.settings.y_label_text if self.settings.y_label_text else spec.y_label
+            else:
+                y_label = self.settings.y_label_text if self.settings.y_label_text else y_label_from_transform
+            
+            if interchanged:
+                x_label, y_label = y_label, x_label
+        
+        # Escape quotes in labels
+        x_label_escaped = x_label.replace("'", "\\'")
+        y_label_escaped = y_label.replace("'", "\\'")
+        
+        lines.append(f"{ax_name}.set_xlabel('{x_label_escaped}', fontsize={self.settings.label_size})")
+        lines.append(f"{ax_name}.set_ylabel('{y_label_escaped}', fontsize={self.settings.label_size})")
+        
+        # Equal aspect for 1D Argand only (2D Argand has it set on ax_argand subplot)
+        if has_argand and not is_2d:
+            lines.append(f"{ax_name}.set_aspect('equal', adjustable='datalim')")
+        
+        # Title
+        if self.settings.title_text:
+            title_escaped = self.settings.title_text.replace("'", "\\'")
+            lines.append(f"{ax_name}.set_title('{title_escaped}', fontsize={self.settings.title_size})")
+        
+        # Tick params
+        lines.append(f"{ax_name}.tick_params(axis='both', which='major', length={self.settings.tick_size}, width={self.settings.tick_width}, labelsize={self.settings.tick_font_size})")
+        
+        # Grid
+        if self.settings.grid_enabled:
+            lines.append(f"{ax_name}.grid(True, alpha={self.settings.grid_alpha}, linewidth={self.settings.grid_width})")
+        
+        # Axis limits
+        if pw._xlim:
+            lines.append(f"{ax_name}.set_xlim({pw._xlim[0]}, {pw._xlim[1]})")
+        if pw._ylim:
+            lines.append(f"{ax_name}.set_ylim({pw._ylim[0]}, {pw._ylim[1]})")
+        
+        # Flips
+        if x_flipped:
+            lines.append(f"{ax_name}.invert_xaxis()")
+        if y_flipped:
+            lines.append(f"{ax_name}.invert_yaxis()")
+        
+        lines.append("")
+        lines.append("plt.tight_layout()")
+        lines.append("plt.show()")
+        
+        return "\n".join(lines)
+
+    def _generate_derivative_code(self, indent: str, var_name: str, x_var: str) -> List[str]:
+        """Generate derivative computation code."""
+        lines = []
+        pw = self.plot_widget
+        smoothing = getattr(pw, '_derivative_smoothing', 0)
+        
+        if smoothing > 0:
+            window = smoothing if smoothing % 2 == 1 else smoothing + 1
+            lines.append(f"{indent}dx = np.mean(np.abs(np.diff({x_var})))")
+            lines.append(f"{indent}{var_name} = savgol_filter({var_name}, window_length={window}, polyorder=min(3, {window}-1), deriv=1, delta=dx)")
+        else:
+            lines.append(f"{indent}{var_name} = np.gradient({var_name}, {x_var})")
+        
+        return lines
+
+    def _generate_norm_code(self) -> str:
+        """Generate normalization code string with vmin/vmax included."""
+        vmin = self.settings.vmin
+        vmax = self.settings.vmax
+        vmin_str = f"vmin={vmin}" if vmin is not None else "vmin=None"
+        vmax_str = f"vmax={vmax}" if vmax is not None else "vmax=None"
+        
+        if self.settings.norm_type == 'power':
+            return f"PowerNorm(gamma={self.settings.norm_gamma}, {vmin_str}, {vmax_str})"
+        elif self.settings.norm_type == 'twoslope':
+            vcenter = self.settings.norm_vcenter if self.settings.norm_vcenter is not None else 0
+            return f"TwoSlopeNorm(vcenter={vcenter}, {vmin_str}, {vmax_str})"
+        elif self.settings.norm_type == 'log':
+            return f"LogNorm({vmin_str}, {vmax_str})"
+        else:
+            return f"Normalize({vmin_str}, {vmax_str})"
+
+    def _generate_fit_code(self, ax_name: str) -> List[str]:
+        """Generate fit curve code."""
+        lines = []
+        if not self._current_fit_result:
+            return lines
+        
+        fit_result = self._current_fit_result
+        model_name = fit_result.model_name
+        params = fit_result.params
+        x_range = fit_result.x_range
+        
+        lines.append("# Fit curve")
+        
+        # Define the fit function based on model
+        if model_name == 'Lorentzian':
+            lines.append("def lorentzian(x, amplitude, center, width, offset):")
+            lines.append("    return amplitude * (width/2)**2 / ((x - center)**2 + (width/2)**2) + offset")
+            func_call = "lorentzian"
+        elif model_name == 'Double Lorentzian':
+            lines.append("def double_lorentzian(x, amp1, center1, width1, amp2, center2, width2, offset):")
+            lines.append("    L1 = amp1 * (width1/2)**2 / ((x - center1)**2 + (width1/2)**2)")
+            lines.append("    L2 = amp2 * (width2/2)**2 / ((x - center2)**2 + (width2/2)**2)")
+            lines.append("    return L1 + L2 + offset")
+            func_call = "double_lorentzian"
+        elif model_name == 'Exponential Decay':
+            lines.append("def exponential_decay(x, amplitude, tau, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) + offset")
+            func_call = "exponential_decay"
+        elif model_name == 'Sin Exp Decay':
+            lines.append("def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset")
+            func_call = "sin_exp_decay"
+        elif model_name == 'Linear':
+            lines.append("def linear(x, slope, intercept):")
+            lines.append("    return slope * x + intercept")
+            func_call = "linear"
+        else:
+            return lines  # Unknown function
+        
+        # Filter data to fit range
+        lines.append(f"fit_mask = (xs >= {x_range[0]}) & (xs <= {x_range[1]})")
+        lines.append("x_data = xs[fit_mask]")
+        lines.append("y_data = zs[fit_mask]")
+        lines.append("")
+        
+        # Build initial guess from fitted params
+        param_list = [f"{p}" for p in params]
+        lines.append(f"initial_guess = [{', '.join(param_list)}]  # From plotter fit")
+        lines.append(f"popt, pcov = curve_fit({func_call}, x_data, y_data, p0=initial_guess)")
+        lines.append("")
+        
+        # Generate smooth x for plotting
+        lines.append(f"x_fit = np.linspace({x_range[0]}, {x_range[1]}, 500)")
+        lines.append(f"y_fit = {func_call}(x_fit, *popt)")
+        
+        # Get fit style from settings
+        fit_color = self.settings.fit_color
+        fit_style = self.settings.fit_line_style
+        
+        lines.append(f"{ax_name}.plot(x_fit, y_fit, '{fit_style}', color='{fit_color}', linewidth={self.settings.fit_line_width}, label='Fit')")
+        
+        return lines
+
+    def _generate_fit_code_2d_linecut(self, interchanged: bool) -> List[str]:
+        """Generate fit curve code for 2D horizontal linecut."""
+        lines = []
+        if not self._current_fit_result:
+            return lines
+        
+        fit_result = self._current_fit_result
+        model_name = fit_result.model_name
+        params = fit_result.params
+        x_range = fit_result.x_range
+        
+        lines.append("# Fit on horizontal linecut")
+        
+        # Define the fit function based on model
+        if model_name == 'Lorentzian':
+            lines.append("def lorentzian(x, amplitude, center, width, offset):")
+            lines.append("    return amplitude * (width/2)**2 / ((x - center)**2 + (width/2)**2) + offset")
+            func_call = "lorentzian"
+        elif model_name == 'Double Lorentzian':
+            lines.append("def double_lorentzian(x, amp1, center1, width1, amp2, center2, width2, offset):")
+            lines.append("    L1 = amp1 * (width1/2)**2 / ((x - center1)**2 + (width1/2)**2)")
+            lines.append("    L2 = amp2 * (width2/2)**2 / ((x - center2)**2 + (width2/2)**2)")
+            lines.append("    return L1 + L2 + offset")
+            func_call = "double_lorentzian"
+        elif model_name == 'Exponential Decay':
+            lines.append("def exponential_decay(x, amplitude, tau, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) + offset")
+            func_call = "exponential_decay"
+        elif model_name == 'Sin Exp Decay':
+            lines.append("def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset")
+            func_call = "sin_exp_decay"
+        elif model_name == 'Linear':
+            lines.append("def linear(x, slope, intercept):")
+            lines.append("    return slope * x + intercept")
+            func_call = "linear"
+        else:
+            return lines  # Unknown function
+        
+        # Extract linecut data and filter to fit range
+        if interchanged:
+            lines.append(f"linecut_x = ys")
+            lines.append(f"linecut_y = zs[v_idx, :]")
+        else:
+            lines.append(f"linecut_x = xs")
+            lines.append(f"linecut_y = zs[h_idx, :]")
+        
+        lines.append(f"fit_mask = (linecut_x >= {x_range[0]}) & (linecut_x <= {x_range[1]})")
+        lines.append("x_data = linecut_x[fit_mask]")
+        lines.append("y_data = linecut_y[fit_mask]")
+        lines.append("")
+        
+        # Build initial guess from fitted params
+        param_list = [f"{p}" for p in params]
+        lines.append(f"initial_guess = [{', '.join(param_list)}]  # From plotter fit")
+        lines.append(f"popt, pcov = curve_fit({func_call}, x_data, y_data, p0=initial_guess)")
+        lines.append("")
+        
+        # Generate smooth x for plotting
+        lines.append(f"x_fit = np.linspace({x_range[0]}, {x_range[1]}, 500)")
+        lines.append(f"y_fit = {func_call}(x_fit, *popt)")
+        
+        # Get fit style from settings
+        fit_color = self.settings.fit_color
+        fit_style = self.settings.fit_line_style
+        
+        lines.append(f"ax_hcut.plot(x_fit, y_fit, '{fit_style}', color='{fit_color}', linewidth={self.settings.fit_line_width}, label='Fit')")
+        
+        return lines
 
     def load_file(self, file_path: str):
         try:
@@ -7127,6 +7925,10 @@ class Plotter(QMainWindow):
         # Re-enable linecuts (may have been disabled by stitched data)
         self.sidebar.linecuts_checkbox.setEnabled(True)
         self.sidebar.linecuts_checkbox.setToolTip("")
+        
+        # Re-enable Argand mode (may have been disabled by stitched data)
+        self.sidebar.argand_checkbox.setEnabled(True)
+        self.sidebar.argand_checkbox.setToolTip("Plot Re[S21] vs Im[S21] - useful for resonator visualization")
         
         # Set z-label (colorbar/y-axis data label) from spec if provided
         if spec.data_label:

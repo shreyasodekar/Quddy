@@ -10,12 +10,18 @@ A PyQt5-based interactive viewer for HDF5 data files, designed for experimental 
 - **In-plotter fitting** - Basic fitting functions (Linear, Lorentzian, Double Lorentzian, Exponential decay, Exponentially decaying sinusoidal). For fitting of resonator traces in polar mode, this amazing package [Resonator](https://github.com/danielflanigan/resonator) by [Daniel Flanigan](https://github.com/danielflanigan) is used.
 - **Linecuts** - Interactive sliders for horizontal/vertical cuts through 2D data
 - **Stitch and Overlay** - Stitch and Overlay multiple plots in a figure.
-- **Transforms** - Built-in transforms (Magnitude, Phase, Real, Imag, dB, etc.) + Polar plots of complex data.
+- **Transforms** - Built-in transforms (Magnitude, Phase, Real, Imag, dB, etc.) + Polar plots of complex data. Derivative and SavgGol smoothing.
 - **Color Normalization** - Linear, Power, and Two-Slope normalization
 - **Stitch Files** - Combine multiple HDF5 files into a single view
 - **Annotations** - Add callouts to plots
 - **Export** - Save figures as PNG/PDF/SVG, copy to clipboard, copy experiment metadata
-- **Style Import/Export** - Save and load appearance settings as JSON
+- **Style Import/Export** - Save and load appearance settings as JSON. Can be used as presets of your own.
+- **Export Python script** - Generate python scripts for the corresponding plots.
+
+For **Live Updates** to work you need to run this in Command Prompt (as an administrator)
+```batch
+set HDF5_USE_FILE_LOCKING=FALSE
+```
 
 ## Usage (Works best alongside Quddy!)
 
@@ -55,6 +61,7 @@ Associate `.h5` files with the plotter so double-clicking opens them directly:
 | `Ctrl+Shift+C` | Copy metadata |
 | `Ctrl+E` | Export/Save figure |
 | `Ctrl+Shift+E` | Export style (JSON) |
+| `Ctrl+P` | Copy Python script to clipboard |
 | `Ctrl+T` | Import style (JSON) |
 | `Ctrl+L` | Toggle linecuts (2D) |
 | `Ctrl+Shift+L` | Toggle live update |
