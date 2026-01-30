@@ -26,7 +26,8 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QGroupBox, QRadioButton,
     QButtonGroup, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox,
     QFrame, QScrollArea, QSplitter, QSlider, QToolButton, QSizePolicy,
-    QColorDialog, QListWidget, QListWidgetItem, QShortcut
+    QColorDialog, QListWidget, QListWidgetItem, QShortcut,
+    QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtGui import QPixmap, QIcon, QFont, QKeySequence
 from PyQt5.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
@@ -73,9 +74,9 @@ class DroppableGroupBox(QGroupBox):
     
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            # Check if any URL is an h5 file
+            # Check if any URL is an h5 or dat file
             for url in event.mimeData().urls():
-                if url.toLocalFile().endswith(('.h5', '.hdf5')):
+                if url.toLocalFile().endswith(('.h5', '.hdf5', '.dat')):
                     event.acceptProposedAction()
                     self.setStyleSheet(self._highlight_style)
                     return
@@ -90,7 +91,7 @@ class DroppableGroupBox(QGroupBox):
             file_paths = []
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                if file_path.endswith(('.h5', '.hdf5')):
+                if file_path.endswith(('.h5', '.hdf5', '.dat')):
                     file_paths.append(file_path)
             if file_paths:
                 event.acceptProposedAction()
@@ -120,6 +121,35 @@ class ExperimentSpec:
     y_scale: float = 1.0
     data_key: str = 'S21'
     data_label: Optional[str] = None  # Label for z-axis / colorbar
+    # Custom axis support (if x_key == '__custom__' or y_key == '__custom__')
+    x_custom_start: Optional[float] = None
+    x_custom_stop: Optional[float] = None
+    x_custom_points: Optional[int] = None
+    y_custom_start: Optional[float] = None
+    y_custom_stop: Optional[float] = None
+    y_custom_points: Optional[int] = None
+
+
+@dataclass
+class DatSpec:
+    """Specification for how to plot a .dat file."""
+    x_col: int = 0
+    y_col: int = 1
+    z_col: int = 3
+    x_label: str = ''
+    y_label: str = ''
+    data_label: str = ''
+    is_2d: bool = True
+    # Scale factors
+    x_scale: float = 1.0
+    y_scale: float = 1.0
+    # Custom axis support (if x_col == -1 or y_col == -1)
+    x_custom_start: Optional[float] = None
+    x_custom_stop: Optional[float] = None
+    x_custom_points: Optional[int] = None
+    y_custom_start: Optional[float] = None
+    y_custom_stop: Optional[float] = None
+    y_custom_points: Optional[int] = None
 
 
 @dataclass
@@ -320,12 +350,12 @@ def exponential_decay(x, amplitude, tau, offset):
     return amplitude * np.exp(-x / tau) + offset
 
 
-def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):
+def sin_exp_decay(x, amplitude, tau, wavelength, phase, offset):
     """
     Exponentially decaying sinusoid.
-    f(x) = amplitude * exp(-x / tau) * sin(2π * frequency * x + phase) + offset
+    f(x) = amplitude * exp(-x / tau) * sin(2π * x / wavelength + phase) + offset
     """
-    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset
+    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * x / wavelength + phase) + offset
 
 
 def linear(x, slope, intercept):
@@ -357,8 +387,8 @@ FIT_MODELS = {
     },
     'Sin Exp Decay': {
         'func': sin_exp_decay,
-        'param_names': ['amplitude', 'tau', 'frequency', 'phase', 'offset'],
-        'param_units': ['y', 'x', '1/x', 'none', 'y'],
+        'param_names': ['amplitude', 'tau', 'wavelength', 'phase', 'offset'],
+        'param_units': ['y', 'x', 'x', 'none', 'y'],
     },
     'Linear': {
         'func': linear,
@@ -861,9 +891,9 @@ class Sidebar(QWidget):
         
         # Derivative mode controls
         deriv_layout = QHBoxLayout()
-        self.derivative_checkbox = QCheckBox("Derivative")
+        self.derivative_checkbox = QCheckBox("x-Derivative")
         self.derivative_checkbox.setToolTip("Plot derivative of data with respect to x-axis")
-        self.derivative_checkbox.toggled.connect(lambda c: self._emit('derivative_toggled', c))
+        self.derivative_checkbox.toggled.connect(self._on_x_derivative_toggled)
         deriv_layout.addWidget(self.derivative_checkbox)
         
         deriv_layout.addWidget(QLabel("Smooth:"))
@@ -877,6 +907,28 @@ class Sidebar(QWidget):
         deriv_layout.addWidget(self.derivative_smoothing_spin)
         deriv_layout.addStretch()
         data_section.add_layout(deriv_layout)
+        
+        # Y-Derivative controls (only visible for 2D plots)
+        self.y_deriv_layout_widget = QWidget()
+        y_deriv_layout = QHBoxLayout(self.y_deriv_layout_widget)
+        y_deriv_layout.setContentsMargins(0, 0, 0, 0)
+        self.y_derivative_checkbox = QCheckBox("y-Derivative")
+        self.y_derivative_checkbox.setToolTip("Plot derivative of data with respect to y-axis")
+        self.y_derivative_checkbox.toggled.connect(self._on_y_derivative_toggled)
+        y_deriv_layout.addWidget(self.y_derivative_checkbox)
+        
+        y_deriv_layout.addWidget(QLabel("Smooth:"))
+        self.y_derivative_smoothing_spin = QSpinBox()
+        self.y_derivative_smoothing_spin.setRange(0, 101)
+        self.y_derivative_smoothing_spin.setSingleStep(2)
+        self.y_derivative_smoothing_spin.setValue(0)
+        self.y_derivative_smoothing_spin.setToolTip("Smoothing window (0=none, odd values recommended)")
+        self.y_derivative_smoothing_spin.valueChanged.connect(lambda v: self._emit('y_derivative_smoothing_changed', v))
+        self.y_derivative_smoothing_spin.setFixedWidth(60)
+        y_deriv_layout.addWidget(self.y_derivative_smoothing_spin)
+        y_deriv_layout.addStretch()
+        self.y_deriv_layout_widget.hide()  # Hidden by default, shown for 2D
+        data_section.add_widget(self.y_deriv_layout_widget)
 
         self.scroll_layout.addWidget(data_section)
 
@@ -1586,6 +1638,24 @@ class Sidebar(QWidget):
         self.scale_controls.setEnabled(not auto)
         self._emit('settings_changed', self.settings)
 
+    def _on_x_derivative_toggled(self, checked: bool):
+        """Handle x-derivative toggle - disable y-derivative if enabled."""
+        if checked and self.y_derivative_checkbox.isChecked():
+            self.y_derivative_checkbox.blockSignals(True)
+            self.y_derivative_checkbox.setChecked(False)
+            self.y_derivative_checkbox.blockSignals(False)
+            self._emit('y_derivative_toggled', False)
+        self._emit('derivative_toggled', checked)
+
+    def _on_y_derivative_toggled(self, checked: bool):
+        """Handle y-derivative toggle - disable x-derivative if enabled."""
+        if checked and self.derivative_checkbox.isChecked():
+            self.derivative_checkbox.blockSignals(True)
+            self.derivative_checkbox.setChecked(False)
+            self.derivative_checkbox.blockSignals(False)
+            self._emit('derivative_toggled', False)
+        self._emit('y_derivative_toggled', checked)
+
     def _on_scale_changed(self):
         self.settings.vmin = self.vmin_spin.value()
         self.settings.vmax = self.vmax_spin.value()
@@ -2030,7 +2100,12 @@ class Sidebar(QWidget):
         self.linecuts_checkbox.setVisible(is_2d)
         self.z_label_widget.setVisible(is_2d)
         self.cbar_shrink_widget.setVisible(is_2d)
+        self.y_deriv_layout_widget.setVisible(is_2d)  # Y-derivative only for 2D
         # Flip Y and Interchange are now available for both 1D and 2D plots
+        
+        # Reset y-derivative if switching to 1D
+        if not is_2d and self.y_derivative_checkbox.isChecked():
+            self.y_derivative_checkbox.setChecked(False)
         
         # Fitting: always available for 1D, requires linecuts for 2D
         if is_2d:
@@ -2081,6 +2156,7 @@ class AxisSelectionDialog(QDialog):
         layout.addWidget(info_label)
 
         datasets = self._get_available_datasets()
+        self._dataset_shapes = self._get_dataset_shapes()  # Store shapes
         datasets_info = QLabel(f"<b>Available datasets:</b> {', '.join(datasets)}")
         datasets_info.setWordWrap(True)
         layout.addWidget(datasets_info)
@@ -2090,12 +2166,20 @@ class AxisSelectionDialog(QDialog):
             self.use_detected_group.setCheckable(True)
             self.use_detected_group.setChecked(True)
             detected_layout = QFormLayout()
-            detected_layout.addRow("X-axis:", QLabel(f"{self.detected_spec.x_key} ({self.detected_spec.x_label})"))
+            # Include shape in detected settings
+            x_shape = self._dataset_shapes.get(self.detected_spec.x_key, "")
+            x_shape_str = f" {x_shape}" if x_shape else ""
+            detected_layout.addRow("X-axis:", QLabel(f"{self.detected_spec.x_key}{x_shape_str} ({self.detected_spec.x_label})"))
             if self.detected_spec.y_key:
-                detected_layout.addRow("Y-axis:", QLabel(f"{self.detected_spec.y_key} ({self.detected_spec.y_label})"))
+                y_shape = self._dataset_shapes.get(self.detected_spec.y_key, "")
+                y_shape_str = f" {y_shape}" if y_shape else ""
+                detected_layout.addRow("Y-axis:", QLabel(f"{self.detected_spec.y_key}{y_shape_str} ({self.detected_spec.y_label})"))
                 detected_layout.addRow("Type:", QLabel("2D"))
             else:
                 detected_layout.addRow("Type:", QLabel("1D"))
+            data_shape = self._dataset_shapes.get(self.detected_spec.data_key, "")
+            data_shape_str = f" {data_shape}" if data_shape else ""
+            detected_layout.addRow("Data:", QLabel(f"{self.detected_spec.data_key}{data_shape_str}"))
             self.use_detected_group.setLayout(detected_layout)
             layout.addWidget(self.use_detected_group)
             self.use_detected_group.toggled.connect(self._on_detected_toggled)
@@ -2123,30 +2207,68 @@ class AxisSelectionDialog(QDialog):
         manual_layout.addRow("Plot type:", type_layout)
         self.type_1d.toggled.connect(self._on_type_changed)
 
+        # Data dataset with shape
+        data_layout = QHBoxLayout()
         self.data_combo = QComboBox()
         self.data_combo.addItems(datasets)
         if self.detected_spec and self.detected_spec.data_key in datasets:
             self.data_combo.setCurrentText(self.detected_spec.data_key)
         elif 'S21' in datasets:
             self.data_combo.setCurrentText('S21')
-        manual_layout.addRow("Data dataset:", self.data_combo)
+        data_layout.addWidget(self.data_combo)
+        self.data_shape_label = QLabel(self._dataset_shapes.get(self.data_combo.currentText(), ""))
+        self.data_shape_label.setStyleSheet("color: #666;")
+        data_layout.addWidget(self.data_shape_label)
+        data_layout.addStretch()
+        manual_layout.addRow("Data dataset:", data_layout)
+        self.data_combo.currentTextChanged.connect(self._on_data_changed)
         
         # Data label - defaults to dataset name
         default_data_label = self.data_combo.currentText()
         self.data_label_edit = QLineEdit(default_data_label)
         manual_layout.addRow("Data label:", self.data_label_edit)
 
+        # X-Axis group
         x_group = QGroupBox("X-Axis")
         x_layout = QFormLayout()
+        
+        # X dataset with shape and custom option
+        x_dataset_layout = QHBoxLayout()
         self.x_key_combo = QComboBox()
-        self.x_key_combo.addItems(datasets)
+        self.x_key_combo.addItems(datasets + ["Custom..."])
         self.x_key_combo.setEditable(True)
-        # Default to detected x_key if available
         if self.detected_spec and self.detected_spec.x_key in datasets:
             self.x_key_combo.setCurrentText(self.detected_spec.x_key)
         elif 'Frequency' in datasets:
             self.x_key_combo.setCurrentText('Frequency')
-        x_layout.addRow("Dataset:", self.x_key_combo)
+        x_dataset_layout.addWidget(self.x_key_combo)
+        self.x_shape_label = QLabel(self._dataset_shapes.get(self.x_key_combo.currentText(), ""))
+        self.x_shape_label.setStyleSheet("color: #666;")
+        x_dataset_layout.addWidget(self.x_shape_label)
+        x_dataset_layout.addStretch()
+        x_layout.addRow("Dataset:", x_dataset_layout)
+        
+        # Custom X linspace fields (hidden by default)
+        self.x_custom_widget = QWidget()
+        x_custom_layout = QHBoxLayout(self.x_custom_widget)
+        x_custom_layout.setContentsMargins(0, 0, 0, 0)
+        x_custom_layout.addWidget(QLabel("np.linspace("))
+        self.x_custom_start = QLineEdit("0")
+        self.x_custom_start.setFixedWidth(80)
+        x_custom_layout.addWidget(self.x_custom_start)
+        x_custom_layout.addWidget(QLabel(","))
+        self.x_custom_stop = QLineEdit("1")
+        self.x_custom_stop.setFixedWidth(80)
+        x_custom_layout.addWidget(self.x_custom_stop)
+        x_custom_layout.addWidget(QLabel(","))
+        self.x_custom_points = QLineEdit("101")
+        self.x_custom_points.setFixedWidth(60)
+        x_custom_layout.addWidget(self.x_custom_points)
+        x_custom_layout.addWidget(QLabel(")"))
+        x_custom_layout.addStretch()
+        self.x_custom_widget.hide()
+        x_layout.addRow("", self.x_custom_widget)
+        
         # Default label to detected label or dataset name
         default_x_label = self.detected_spec.x_label if self.detected_spec else self.x_key_combo.currentText()
         self.x_label_edit = QLineEdit(default_x_label)
@@ -2154,7 +2276,6 @@ class AxisSelectionDialog(QDialog):
         self.x_scale_spin = QDoubleSpinBox()
         self.x_scale_spin.setDecimals(12)
         self.x_scale_spin.setRange(1e-15, 1e15)
-        # Default to detected scale if available
         if self.detected_spec:
             self.x_scale_spin.setValue(self.detected_spec.x_scale)
         else:
@@ -2171,21 +2292,53 @@ class AxisSelectionDialog(QDialog):
         x_layout.addRow("Presets:", x_scale_presets)
         x_group.setLayout(x_layout)
         manual_layout.addRow(x_group)
+        
+        # Connect X combo change
+        self.x_key_combo.currentTextChanged.connect(self._on_x_key_changed)
 
+        # Y-Axis group
         self.y_group = QGroupBox("Y-Axis (for 2D plots)")
         y_layout = QFormLayout()
+        
+        # Y dataset with shape and custom option
+        y_dataset_layout = QHBoxLayout()
         self.y_key_combo = QComboBox()
-        self.y_key_combo.addItems(datasets)
+        self.y_key_combo.addItems(datasets + ["Custom..."])
         self.y_key_combo.setEditable(True)
-        # Default to detected y_key if available
         if self.detected_spec and self.detected_spec.y_key and self.detected_spec.y_key in datasets:
             self.y_key_combo.setCurrentText(self.detected_spec.y_key)
         elif 'Power' in datasets:
             self.y_key_combo.setCurrentText('Power')
         elif 'Gate Voltage' in datasets:
             self.y_key_combo.setCurrentText('Gate Voltage')
-        y_layout.addRow("Dataset:", self.y_key_combo)
-        # Default label to detected label or dataset name
+        y_dataset_layout.addWidget(self.y_key_combo)
+        self.y_shape_label = QLabel(self._dataset_shapes.get(self.y_key_combo.currentText(), ""))
+        self.y_shape_label.setStyleSheet("color: #666;")
+        y_dataset_layout.addWidget(self.y_shape_label)
+        y_dataset_layout.addStretch()
+        y_layout.addRow("Dataset:", y_dataset_layout)
+        
+        # Custom Y linspace fields (hidden by default)
+        self.y_custom_widget = QWidget()
+        y_custom_layout = QHBoxLayout(self.y_custom_widget)
+        y_custom_layout.setContentsMargins(0, 0, 0, 0)
+        y_custom_layout.addWidget(QLabel("np.linspace("))
+        self.y_custom_start = QLineEdit("0")
+        self.y_custom_start.setFixedWidth(80)
+        y_custom_layout.addWidget(self.y_custom_start)
+        y_custom_layout.addWidget(QLabel(","))
+        self.y_custom_stop = QLineEdit("1")
+        self.y_custom_stop.setFixedWidth(80)
+        y_custom_layout.addWidget(self.y_custom_stop)
+        y_custom_layout.addWidget(QLabel(","))
+        self.y_custom_points = QLineEdit("101")
+        self.y_custom_points.setFixedWidth(60)
+        y_custom_layout.addWidget(self.y_custom_points)
+        y_custom_layout.addWidget(QLabel(")"))
+        y_custom_layout.addStretch()
+        self.y_custom_widget.hide()
+        y_layout.addRow("", self.y_custom_widget)
+        
         if self.detected_spec and self.detected_spec.y_label:
             default_y_label = self.detected_spec.y_label
         else:
@@ -2195,7 +2348,6 @@ class AxisSelectionDialog(QDialog):
         self.y_scale_spin = QDoubleSpinBox()
         self.y_scale_spin.setDecimals(12)
         self.y_scale_spin.setRange(1e-15, 1e15)
-        # Default to detected scale if available
         if self.detected_spec and self.detected_spec.y_scale:
             self.y_scale_spin.setValue(self.detected_spec.y_scale)
         else:
@@ -2211,15 +2363,16 @@ class AxisSelectionDialog(QDialog):
         y_scale_presets.addStretch()
         y_layout.addRow("Presets:", y_scale_presets)
         self.y_group.setLayout(y_layout)
-        # Enable/disable Y-axis group based on plot type
         self.y_group.setEnabled(self.type_2d.isChecked())
         manual_layout.addRow(self.y_group)
+        
+        # Connect Y combo change
+        self.y_key_combo.currentTextChanged.connect(self._on_y_key_changed)
 
         inst_layout = QHBoxLayout()
         self.inst_cw = QRadioButton("CW (VNA)")
         self.inst_rfsoc = QRadioButton("RFSOC")
         self.inst_generic = QRadioButton("Generic")
-        # Default to detected data type if available
         if self.detected_spec:
             exp_type = self.detected_spec.exp_type
             if exp_type in (ExperimentType.CW_1D, ExperimentType.CW_2D):
@@ -2251,28 +2404,51 @@ class AxisSelectionDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
-        # Auto-update labels when dataset changes (if label matches old dataset name or is generic)
-        def update_data_label(new_text):
-            current = self.data_label_edit.text()
-            # Update if label is empty or matches any dataset name
-            if current == "" or current in datasets:
-                self.data_label_edit.setText(new_text)
-        
-        def update_x_label(new_text):
-            current = self.x_label_edit.text()
-            # Update if label is generic, empty, or matches any dataset name
-            if current in ("X", "") or current in datasets:
-                self.x_label_edit.setText(new_text)
-        
-        def update_y_label(new_text):
-            current = self.y_label_edit.text()
-            # Update if label is generic, empty, or matches any dataset name
-            if current in ("Y", "") or current in datasets:
-                self.y_label_edit.setText(new_text)
-        
-        self.data_combo.currentTextChanged.connect(update_data_label)
-        self.x_key_combo.currentTextChanged.connect(update_x_label)
-        self.y_key_combo.currentTextChanged.connect(update_y_label)
+    def _get_dataset_shapes(self) -> dict:
+        """Get shapes of all datasets in the HDF5 file."""
+        shapes = {}
+        def visitor(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                shapes[name] = str(obj.shape)
+        self.h5file.visititems(visitor)
+        return shapes
+
+    def _on_data_changed(self, text):
+        """Update data shape label when dataset changes."""
+        shape = self._dataset_shapes.get(text, "")
+        self.data_shape_label.setText(shape)
+        # Update data label if it was auto-set
+        datasets = self._get_available_datasets()
+        if self.data_label_edit.text() in datasets or self.data_label_edit.text() == "":
+            self.data_label_edit.setText(text)
+
+    def _on_x_key_changed(self, text):
+        """Update X shape label and show/hide custom fields."""
+        if text == "Custom...":
+            self.x_custom_widget.show()
+            self.x_shape_label.setText("")
+        else:
+            self.x_custom_widget.hide()
+            shape = self._dataset_shapes.get(text, "")
+            self.x_shape_label.setText(shape)
+            # Update label if it was auto-set
+            datasets = self._get_available_datasets()
+            if self.x_label_edit.text() in datasets or self.x_label_edit.text() in ("X", ""):
+                self.x_label_edit.setText(text)
+
+    def _on_y_key_changed(self, text):
+        """Update Y shape label and show/hide custom fields."""
+        if text == "Custom...":
+            self.y_custom_widget.show()
+            self.y_shape_label.setText("")
+        else:
+            self.y_custom_widget.hide()
+            shape = self._dataset_shapes.get(text, "")
+            self.y_shape_label.setText(shape)
+            # Update label if it was auto-set
+            datasets = self._get_available_datasets()
+            if self.y_label_edit.text() in datasets or self.y_label_edit.text() in ("Y", ""):
+                self.y_label_edit.setText(text)
 
     def _get_available_datasets(self) -> List[str]:
         datasets = []
@@ -2300,7 +2476,21 @@ class AxisSelectionDialog(QDialog):
             return
 
         x_key = self.x_key_combo.currentText().strip()
-        if not x_key or x_key not in self.h5file:
+        x_custom_start, x_custom_stop, x_custom_points = None, None, None
+        
+        if x_key == "Custom...":
+            # Validate custom X axis
+            try:
+                x_custom_start = float(self.x_custom_start.text())
+                x_custom_stop = float(self.x_custom_stop.text())
+                x_custom_points = int(self.x_custom_points.text())
+                if x_custom_points < 2:
+                    raise ValueError("Points must be >= 2")
+                x_key = "__custom__"
+            except ValueError as e:
+                QMessageBox.warning(self, "Error", f"Invalid X-axis custom values: {e}")
+                return
+        elif not x_key or x_key not in self.h5file:
             QMessageBox.warning(self, "Error", f"Invalid X-axis dataset: {x_key}")
             return
 
@@ -2311,10 +2501,23 @@ class AxisSelectionDialog(QDialog):
 
         is_2d = self.type_2d.isChecked()
         y_key, y_label, y_scale = None, None, 1.0
+        y_custom_start, y_custom_stop, y_custom_points = None, None, None
 
         if is_2d:
             y_key = self.y_key_combo.currentText().strip()
-            if not y_key or y_key not in self.h5file:
+            if y_key == "Custom...":
+                # Validate custom Y axis
+                try:
+                    y_custom_start = float(self.y_custom_start.text())
+                    y_custom_stop = float(self.y_custom_stop.text())
+                    y_custom_points = int(self.y_custom_points.text())
+                    if y_custom_points < 2:
+                        raise ValueError("Points must be >= 2")
+                    y_key = "__custom__"
+                except ValueError as e:
+                    QMessageBox.warning(self, "Error", f"Invalid Y-axis custom values: {e}")
+                    return
+            elif not y_key or y_key not in self.h5file:
                 QMessageBox.warning(self, "Error", f"Invalid Y-axis dataset: {y_key}")
                 return
             y_label = self.y_label_edit.text() or y_key
@@ -2336,9 +2539,717 @@ class AxisSelectionDialog(QDialog):
             y_label=y_label,
             y_scale=y_scale,
             data_key=data_key,
-            data_label=self.data_label_edit.text() or data_key
+            data_label=self.data_label_edit.text() or data_key,
+            x_custom_start=x_custom_start,
+            x_custom_stop=x_custom_stop,
+            x_custom_points=x_custom_points,
+            y_custom_start=y_custom_start,
+            y_custom_stop=y_custom_stop,
+            y_custom_points=y_custom_points
         )
         self.accept()
+
+
+class DatAxisSelectionDialog(QDialog):
+    """Dialog for configuring .dat file column selection."""
+
+    def __init__(self, file_path: str, current_spec: Optional[DatSpec] = None, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.result_spec: Optional[DatSpec] = None
+        self._current_spec = current_spec  # Existing spec to pre-populate
+        
+        # Load dat file to get labels and shape
+        from qtplot.data import DatFile
+        self._dat = DatFile(filename=file_path)
+        self._labels = self._dat.labels
+        self._num_cols = len(self._labels)
+        
+        # Get data shape
+        try:
+            self._data_shape = self._dat.data.shape
+        except:
+            self._data_shape = None
+        
+        # Auto-detect 1D vs 2D
+        self._auto_is_2d = self._labels[1] != 'ychannel_()' if len(self._labels) > 1 else False
+
+        self.setWindowTitle("Configure .dat File Axes")
+        self.setMinimumWidth(550)
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # File info
+        info_label = QLabel(f"<b>File:</b> {os.path.basename(self.file_path)}")
+        layout.addWidget(info_label)
+        
+        # Data shape info
+        if self._data_shape:
+            shape_label = QLabel(f"<b>Data shape:</b> {self._data_shape}")
+            layout.addWidget(shape_label)
+
+        # Show available columns with labels
+        cols_text = "<b>Available columns:</b><br>"
+        for i, label in enumerate(self._labels):
+            cols_text += f"&nbsp;&nbsp;Column {i}: {label}<br>"
+        cols_label = QLabel(cols_text)
+        cols_label.setWordWrap(True)
+        layout.addWidget(cols_label)
+
+        # Auto-detection info
+        if self._auto_is_2d:
+            detect_label = QLabel("<i>Auto-detected: 2D data</i>")
+        else:
+            detect_label = QLabel("<i>Auto-detected: 1D data (y-channel is empty)</i>")
+        layout.addWidget(detect_label)
+
+        # Configuration group
+        config_group = QGroupBox("Column Configuration")
+        config_layout = QFormLayout()
+
+        # Determine defaults from current spec or auto-detect
+        if self._current_spec:
+            default_x_col = self._current_spec.x_col
+            default_y_col = self._current_spec.y_col
+            default_z_col = self._current_spec.z_col
+            default_is_2d = self._current_spec.is_2d
+            default_x_label = self._current_spec.x_label
+            default_y_label = self._current_spec.y_label
+            default_z_label = self._current_spec.data_label
+            default_x_scale = getattr(self._current_spec, 'x_scale', 1.0)
+            default_y_scale = getattr(self._current_spec, 'y_scale', 1.0)
+            # Custom axis defaults
+            default_x_custom_start = getattr(self._current_spec, 'x_custom_start', None)
+            default_x_custom_stop = getattr(self._current_spec, 'x_custom_stop', None)
+            default_x_custom_points = getattr(self._current_spec, 'x_custom_points', None)
+            default_y_custom_start = getattr(self._current_spec, 'y_custom_start', None)
+            default_y_custom_stop = getattr(self._current_spec, 'y_custom_stop', None)
+            default_y_custom_points = getattr(self._current_spec, 'y_custom_points', None)
+        else:
+            default_x_col = 0
+            default_y_col = 1
+            default_z_col = 3 if len(self._labels) > 3 else (2 if len(self._labels) > 2 else 0)
+            default_is_2d = self._auto_is_2d
+            default_x_label = self._labels[0] if self._labels else "X"
+            default_y_label = self._labels[1] if len(self._labels) > 1 else "Y"
+            default_z_label = self._labels[default_z_col] if default_z_col < len(self._labels) else "Data"
+            default_x_scale = 1.0
+            default_y_scale = 1.0
+            default_x_custom_start, default_x_custom_stop, default_x_custom_points = None, None, None
+            default_y_custom_start, default_y_custom_stop, default_y_custom_points = None, None, None
+
+        # Plot type selection
+        type_layout = QHBoxLayout()
+        self.type_1d = QRadioButton("1D Plot")
+        self.type_2d = QRadioButton("2D Plot")
+        if default_is_2d:
+            self.type_2d.setChecked(True)
+        else:
+            self.type_1d.setChecked(True)
+        self.type_group = QButtonGroup()
+        self.type_group.addButton(self.type_1d)
+        self.type_group.addButton(self.type_2d)
+        type_layout.addWidget(self.type_1d)
+        type_layout.addWidget(self.type_2d)
+        type_layout.addStretch()
+        config_layout.addRow("Plot type:", type_layout)
+        self.type_1d.toggled.connect(self._on_type_changed)
+
+        # X-axis group
+        x_group = QGroupBox("X-Axis")
+        x_layout = QFormLayout()
+        
+        # X column with shape info
+        x_col_layout = QHBoxLayout()
+        self.x_col_combo = QComboBox()
+        for i, label in enumerate(self._labels):
+            self.x_col_combo.addItem(f"Column {i}: {label}", i)
+        self.x_col_combo.addItem("Custom...", -1)
+        if default_x_col == -1:
+            self.x_col_combo.setCurrentIndex(len(self._labels))  # Custom is last item
+        elif default_x_col >= 0:
+            self.x_col_combo.setCurrentIndex(default_x_col)
+        x_col_layout.addWidget(self.x_col_combo)
+        self.x_shape_label = QLabel(self._get_column_shape_str(default_x_col))
+        self.x_shape_label.setStyleSheet("color: #666;")
+        x_col_layout.addWidget(self.x_shape_label)
+        x_col_layout.addStretch()
+        x_layout.addRow("Column:", x_col_layout)
+        
+        # Custom X linspace fields (hidden by default unless custom was selected)
+        self.x_custom_widget = QWidget()
+        x_custom_layout = QHBoxLayout(self.x_custom_widget)
+        x_custom_layout.setContentsMargins(0, 0, 0, 0)
+        x_custom_layout.addWidget(QLabel("np.linspace("))
+        self.x_custom_start = QLineEdit(str(default_x_custom_start) if default_x_custom_start is not None else "0")
+        self.x_custom_start.setFixedWidth(80)
+        x_custom_layout.addWidget(self.x_custom_start)
+        x_custom_layout.addWidget(QLabel(","))
+        self.x_custom_stop = QLineEdit(str(default_x_custom_stop) if default_x_custom_stop is not None else "1")
+        self.x_custom_stop.setFixedWidth(80)
+        x_custom_layout.addWidget(self.x_custom_stop)
+        x_custom_layout.addWidget(QLabel(","))
+        self.x_custom_points = QLineEdit(str(default_x_custom_points) if default_x_custom_points is not None else "101")
+        self.x_custom_points.setFixedWidth(60)
+        x_custom_layout.addWidget(self.x_custom_points)
+        x_custom_layout.addWidget(QLabel(")"))
+        x_custom_layout.addStretch()
+        if default_x_col == -1:
+            self.x_custom_widget.show()
+        else:
+            self.x_custom_widget.hide()
+        x_layout.addRow("", self.x_custom_widget)
+        
+        self.x_label_edit = QLineEdit(default_x_label)
+        x_layout.addRow("Label:", self.x_label_edit)
+        
+        # X scale factor
+        self.x_scale_spin = QDoubleSpinBox()
+        self.x_scale_spin.setDecimals(12)
+        self.x_scale_spin.setRange(1e-15, 1e15)
+        self.x_scale_spin.setValue(default_x_scale)
+        x_layout.addRow("Scale factor:", self.x_scale_spin)
+        
+        # X scale presets
+        x_scale_presets = QHBoxLayout()
+        for name, val in [("Hz→GHz", 1e-9), ("s→μs", 1e6), ("s→ns", 1e9), ("1.0", 1.0)]:
+            btn = QPushButton(name)
+            btn.setFixedWidth(70)
+            btn.clicked.connect(lambda checked, v=val: self.x_scale_spin.setValue(v))
+            x_scale_presets.addWidget(btn)
+        x_scale_presets.addStretch()
+        x_layout.addRow("Presets:", x_scale_presets)
+        
+        x_group.setLayout(x_layout)
+        config_layout.addRow(x_group)
+        
+        # Connect X combo change
+        self.x_col_combo.currentIndexChanged.connect(self._on_x_col_changed)
+
+        # Y-axis group (for 2D)
+        self.y_group = QGroupBox("Y-Axis (for 2D plots)")
+        y_layout = QFormLayout()
+        
+        # Y column with shape info
+        y_col_layout = QHBoxLayout()
+        self.y_col_combo = QComboBox()
+        for i, label in enumerate(self._labels):
+            self.y_col_combo.addItem(f"Column {i}: {label}", i)
+        self.y_col_combo.addItem("Custom...", -1)
+        if default_y_col == -1:
+            self.y_col_combo.setCurrentIndex(len(self._labels))  # Custom is last item
+        elif default_y_col >= 0 and default_y_col < len(self._labels):
+            self.y_col_combo.setCurrentIndex(default_y_col)
+        y_col_layout.addWidget(self.y_col_combo)
+        self.y_shape_label = QLabel(self._get_column_shape_str(default_y_col))
+        self.y_shape_label.setStyleSheet("color: #666;")
+        y_col_layout.addWidget(self.y_shape_label)
+        y_col_layout.addStretch()
+        y_layout.addRow("Column:", y_col_layout)
+        
+        # Custom Y linspace fields (hidden by default unless custom was selected)
+        self.y_custom_widget = QWidget()
+        y_custom_layout = QHBoxLayout(self.y_custom_widget)
+        y_custom_layout.setContentsMargins(0, 0, 0, 0)
+        y_custom_layout.addWidget(QLabel("np.linspace("))
+        self.y_custom_start = QLineEdit(str(default_y_custom_start) if default_y_custom_start is not None else "0")
+        self.y_custom_start.setFixedWidth(80)
+        y_custom_layout.addWidget(self.y_custom_start)
+        y_custom_layout.addWidget(QLabel(","))
+        self.y_custom_stop = QLineEdit(str(default_y_custom_stop) if default_y_custom_stop is not None else "1")
+        self.y_custom_stop.setFixedWidth(80)
+        y_custom_layout.addWidget(self.y_custom_stop)
+        y_custom_layout.addWidget(QLabel(","))
+        self.y_custom_points = QLineEdit(str(default_y_custom_points) if default_y_custom_points is not None else "101")
+        self.y_custom_points.setFixedWidth(60)
+        y_custom_layout.addWidget(self.y_custom_points)
+        y_custom_layout.addWidget(QLabel(")"))
+        y_custom_layout.addStretch()
+        if default_y_col == -1:
+            self.y_custom_widget.show()
+        else:
+            self.y_custom_widget.hide()
+        y_layout.addRow("", self.y_custom_widget)
+        
+        self.y_label_edit = QLineEdit(default_y_label)
+        y_layout.addRow("Label:", self.y_label_edit)
+        
+        # Y scale factor
+        self.y_scale_spin = QDoubleSpinBox()
+        self.y_scale_spin.setDecimals(12)
+        self.y_scale_spin.setRange(1e-15, 1e15)
+        self.y_scale_spin.setValue(default_y_scale)
+        y_layout.addRow("Scale factor:", self.y_scale_spin)
+        
+        # Y scale presets
+        y_scale_presets = QHBoxLayout()
+        for name, val in [("V→mV", 1e3), ("Hz→GHz", 1e-9), ("1.0", 1.0)]:
+            btn = QPushButton(name)
+            btn.setFixedWidth(70)
+            btn.clicked.connect(lambda checked, v=val: self.y_scale_spin.setValue(v))
+            y_scale_presets.addWidget(btn)
+        y_scale_presets.addStretch()
+        y_layout.addRow("Presets:", y_scale_presets)
+        
+        self.y_group.setLayout(y_layout)
+        self.y_group.setEnabled(self.type_2d.isChecked())
+        config_layout.addRow(self.y_group)
+        
+        # Connect Y combo change
+        self.y_col_combo.currentIndexChanged.connect(self._on_y_col_changed)
+
+        # Z-axis (data) column
+        z_group = QGroupBox("Data (Z-Axis)")
+        z_layout = QFormLayout()
+        
+        # Z column with shape info
+        z_col_layout = QHBoxLayout()
+        self.z_col_combo = QComboBox()
+        for i, label in enumerate(self._labels):
+            self.z_col_combo.addItem(f"Column {i}: {label}", i)
+        if default_z_col < len(self._labels):
+            self.z_col_combo.setCurrentIndex(default_z_col)
+        z_col_layout.addWidget(self.z_col_combo)
+        self.z_shape_label = QLabel(self._get_column_shape_str(default_z_col))
+        self.z_shape_label.setStyleSheet("color: #666;")
+        z_col_layout.addWidget(self.z_shape_label)
+        z_col_layout.addStretch()
+        z_layout.addRow("Column:", z_col_layout)
+        
+        self.z_label_edit = QLineEdit(default_z_label)
+        z_layout.addRow("Label:", self.z_label_edit)
+        z_group.setLayout(z_layout)
+        config_layout.addRow(z_group)
+        
+        # Connect Z combo change
+        self.z_col_combo.currentIndexChanged.connect(self._on_z_col_changed)
+
+        config_group.setLayout(config_layout)
+        layout.addWidget(config_group)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _get_column_shape_str(self, col_index: int) -> str:
+        """Get shape string for a column."""
+        if col_index < 0 or self._data_shape is None:
+            return ""
+        if len(self._data_shape) == 2:
+            return f"({self._data_shape[0]},)"
+        return ""
+
+    def _on_type_changed(self, checked):
+        """Handle plot type radio button change."""
+        self.y_group.setEnabled(self.type_2d.isChecked())
+
+    def _on_x_col_changed(self, index):
+        """Update x label and shape when column selection changes."""
+        col_data = self.x_col_combo.currentData()
+        if col_data == -1:  # Custom
+            self.x_custom_widget.show()
+            self.x_shape_label.setText("")
+        else:
+            self.x_custom_widget.hide()
+            self.x_shape_label.setText(self._get_column_shape_str(col_data))
+            if 0 <= col_data < len(self._labels):
+                current_label = self.x_label_edit.text()
+                if current_label in self._labels or current_label in ("X", ""):
+                    self.x_label_edit.setText(self._labels[col_data])
+
+    def _on_y_col_changed(self, index):
+        """Update y label and shape when column selection changes."""
+        col_data = self.y_col_combo.currentData()
+        if col_data == -1:  # Custom
+            self.y_custom_widget.show()
+            self.y_shape_label.setText("")
+        else:
+            self.y_custom_widget.hide()
+            self.y_shape_label.setText(self._get_column_shape_str(col_data))
+            if 0 <= col_data < len(self._labels):
+                current_label = self.y_label_edit.text()
+                if current_label in self._labels or current_label in ("Y", ""):
+                    self.y_label_edit.setText(self._labels[col_data])
+
+    def _on_z_col_changed(self, index):
+        """Update z label and shape when column selection changes."""
+        col_data = self.z_col_combo.currentData()
+        self.z_shape_label.setText(self._get_column_shape_str(col_data))
+        if 0 <= col_data < len(self._labels):
+            current_label = self.z_label_edit.text()
+            if current_label in self._labels or current_label in ("Data", "Z", ""):
+                self.z_label_edit.setText(self._labels[col_data])
+
+    def _on_accept(self):
+        """Validate and create DatSpec."""
+        x_col = self.x_col_combo.currentData()
+        y_col = self.y_col_combo.currentData()
+        z_col = self.z_col_combo.currentData()
+        is_2d = self.type_2d.isChecked()
+        
+        # Handle custom X axis
+        x_custom_start, x_custom_stop, x_custom_points = None, None, None
+        if x_col == -1:  # Custom
+            try:
+                x_custom_start = float(self.x_custom_start.text())
+                x_custom_stop = float(self.x_custom_stop.text())
+                x_custom_points = int(self.x_custom_points.text())
+                if x_custom_points < 2:
+                    raise ValueError("Points must be >= 2")
+            except ValueError as e:
+                QMessageBox.warning(self, "Error", f"Invalid X-axis custom values: {e}")
+                return
+        
+        # Handle custom Y axis
+        y_custom_start, y_custom_stop, y_custom_points = None, None, None
+        if is_2d and y_col == -1:  # Custom
+            try:
+                y_custom_start = float(self.y_custom_start.text())
+                y_custom_stop = float(self.y_custom_stop.text())
+                y_custom_points = int(self.y_custom_points.text())
+                if y_custom_points < 2:
+                    raise ValueError("Points must be >= 2")
+            except ValueError as e:
+                QMessageBox.warning(self, "Error", f"Invalid Y-axis custom values: {e}")
+                return
+
+        # Validate column selections (only for non-custom)
+        if x_col >= 0 and x_col == z_col:
+            QMessageBox.warning(self, "Error", "X-axis and Data columns cannot be the same.")
+            return
+        if is_2d and y_col >= 0 and (y_col == x_col or y_col == z_col):
+            QMessageBox.warning(self, "Error", "Y-axis column must be different from X-axis and Data columns.")
+            return
+
+        self.result_spec = DatSpec(
+            x_col=x_col,
+            y_col=y_col if is_2d else 1,
+            z_col=z_col,
+            x_label=self.x_label_edit.text() or f"Column {x_col}",
+            y_label=self.y_label_edit.text() or f"Column {y_col}" if is_2d else "",
+            data_label=self.z_label_edit.text() or f"Column {z_col}",
+            is_2d=is_2d,
+            x_scale=self.x_scale_spin.value(),
+            y_scale=self.y_scale_spin.value(),
+            x_custom_start=x_custom_start,
+            x_custom_stop=x_custom_stop,
+            x_custom_points=x_custom_points,
+            y_custom_start=y_custom_start,
+            y_custom_stop=y_custom_stop,
+            y_custom_points=y_custom_points
+        )
+        self.accept()
+
+
+class HDF5BrowserDialog(QDialog):
+    """Dialog for browsing HDF5 file structure and viewing dataset contents."""
+
+    MAX_DISPLAY_ROWS = 1000
+    MAX_DISPLAY_COLS = 100
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self._h5file = None
+        
+        self.setWindowTitle(f"HDF5 Browser - {os.path.basename(file_path)}")
+        self.setMinimumSize(900, 600)
+        self.resize(1000, 700)
+        
+        self._setup_ui()
+        self._open_file_and_build_tree()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Main splitter for tree and data view
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel - Tree view
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
+        tree_label = QLabel("<b>File Structure</b>")
+        left_layout.addWidget(tree_label)
+        
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Name", "Type/Shape"])
+        self.tree.setColumnWidth(0, 200)
+        self.tree.itemClicked.connect(self._on_item_clicked)
+        left_layout.addWidget(self.tree)
+        
+        splitter.addWidget(left_widget)
+        
+        # Right panel - Dataset info and data view
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Info section
+        info_group = QGroupBox("Dataset Info")
+        info_layout = QFormLayout(info_group)
+        
+        self.path_label = QLabel("-")
+        self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        info_layout.addRow("Path:", self.path_label)
+        
+        self.shape_label = QLabel("-")
+        info_layout.addRow("Shape:", self.shape_label)
+        
+        self.dtype_label = QLabel("-")
+        info_layout.addRow("Dtype:", self.dtype_label)
+        
+        self.size_label = QLabel("-")
+        info_layout.addRow("Size:", self.size_label)
+        
+        right_layout.addWidget(info_group)
+        
+        # Data table section
+        data_label = QLabel("<b>Data Preview</b>")
+        right_layout.addWidget(data_label)
+        
+        self.status_label = QLabel("Select a dataset to view its contents")
+        self.status_label.setStyleSheet("color: #666; font-style: italic;")
+        right_layout.addWidget(self.status_label)
+        
+        self.data_table = QTableWidget()
+        self.data_table.setAlternatingRowColors(True)
+        right_layout.addWidget(self.data_table)
+        
+        splitter.addWidget(right_widget)
+        
+        # Set initial splitter sizes (30% tree, 70% data)
+        splitter.setSizes([300, 700])
+        
+        layout.addWidget(splitter)
+        
+        # Close button
+        button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _open_file_and_build_tree(self):
+        """Open HDF5 file and populate tree."""
+        try:
+            self._h5file = h5py.File(self.file_path, 'r')
+            self._build_tree()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open HDF5 file:\n{e}")
+
+    def _build_tree(self):
+        """Build tree structure from HDF5 file."""
+        self.tree.clear()
+        
+        # Root item
+        root = QTreeWidgetItem(self.tree, ["/", "Root"])
+        root.setData(0, Qt.UserRole, "/")
+        root.setExpanded(True)
+        
+        # Recursively add items
+        self._add_group_items(self._h5file, root)
+
+    def _add_group_items(self, group, parent_item):
+        """Recursively add HDF5 groups and datasets to tree."""
+        for name in sorted(group.keys()):
+            try:
+                item = group[name]
+                child = QTreeWidgetItem(parent_item)
+                child.setText(0, name)
+                child.setData(0, Qt.UserRole, item.name)  # Full HDF5 path
+                
+                if isinstance(item, h5py.Group):
+                    child.setText(1, "Group")
+                    child.setForeground(0, Qt.darkBlue)
+                    # Recurse into group
+                    self._add_group_items(item, child)
+                else:
+                    # Dataset
+                    shape_str = str(item.shape) if item.shape else "scalar"
+                    child.setText(1, shape_str)
+                    child.setForeground(0, Qt.darkGreen)
+            except Exception as e:
+                # Handle broken links or permission issues
+                child = QTreeWidgetItem(parent_item, [name, f"Error: {e}"])
+                child.setForeground(0, Qt.red)
+
+    def _on_item_clicked(self, item, column):
+        """Handle tree item click - display dataset info and data."""
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+        
+        try:
+            h5_item = self._h5file[path]
+            
+            if isinstance(h5_item, h5py.Group):
+                # Group selected - show group info
+                self.path_label.setText(path)
+                self.shape_label.setText("-")
+                self.dtype_label.setText("Group")
+                num_items = len(h5_item.keys())
+                self.size_label.setText(f"{num_items} items")
+                self.status_label.setText("Groups cannot be displayed as data. Select a dataset.")
+                self.data_table.clear()
+                self.data_table.setRowCount(0)
+                self.data_table.setColumnCount(0)
+            else:
+                # Dataset selected
+                self._display_dataset(h5_item, path)
+                
+        except Exception as e:
+            self.status_label.setText(f"Error loading item: {e}")
+
+    def _display_dataset(self, dataset, path):
+        """Display dataset info and data in table."""
+        # Update info labels
+        self.path_label.setText(path)
+        self.shape_label.setText(str(dataset.shape) if dataset.shape else "scalar")
+        self.dtype_label.setText(str(dataset.dtype))
+        
+        # Calculate size
+        if dataset.shape:
+            total_elements = np.prod(dataset.shape)
+            size_bytes = total_elements * dataset.dtype.itemsize
+            if size_bytes < 1024:
+                size_str = f"{size_bytes} bytes"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+            self.size_label.setText(f"{total_elements:,} elements ({size_str})")
+        else:
+            self.size_label.setText("1 element (scalar)")
+        
+        # Load and display data
+        try:
+            data = dataset[()]
+            self._populate_table(data)
+        except Exception as e:
+            self.status_label.setText(f"Error reading data: {e}")
+            self.data_table.clear()
+            self.data_table.setRowCount(0)
+            self.data_table.setColumnCount(0)
+
+    def _populate_table(self, data):
+        """Populate table with data."""
+        self.data_table.clear()
+        
+        # Handle different data types
+        if isinstance(data, bytes):
+            # Bytes/string data
+            try:
+                text = data.decode('utf-8')
+            except:
+                text = str(data)
+            self.data_table.setRowCount(1)
+            self.data_table.setColumnCount(1)
+            self.data_table.setHorizontalHeaderLabels(["Value"])
+            self.data_table.setItem(0, 0, QTableWidgetItem(text))
+            self.status_label.setText("String/bytes data")
+            return
+        
+        if np.isscalar(data) or (isinstance(data, np.ndarray) and data.ndim == 0):
+            # Scalar
+            self.data_table.setRowCount(1)
+            self.data_table.setColumnCount(1)
+            self.data_table.setHorizontalHeaderLabels(["Value"])
+            self.data_table.setItem(0, 0, QTableWidgetItem(self._format_value(data)))
+            self.status_label.setText("Scalar value")
+            return
+        
+        data = np.asarray(data)
+        
+        if data.ndim == 1:
+            # 1D array
+            n_rows = min(len(data), self.MAX_DISPLAY_ROWS)
+            self.data_table.setRowCount(n_rows)
+            self.data_table.setColumnCount(1)
+            self.data_table.setHorizontalHeaderLabels(["Value"])
+            
+            for i in range(n_rows):
+                self.data_table.setItem(i, 0, QTableWidgetItem(self._format_value(data[i])))
+            
+            if len(data) > self.MAX_DISPLAY_ROWS:
+                self.status_label.setText(f"Showing first {self.MAX_DISPLAY_ROWS} of {len(data):,} rows")
+            else:
+                self.status_label.setText(f"{len(data):,} rows")
+                
+        elif data.ndim == 2:
+            # 2D array
+            n_rows = min(data.shape[0], self.MAX_DISPLAY_ROWS)
+            n_cols = min(data.shape[1], self.MAX_DISPLAY_COLS)
+            
+            self.data_table.setRowCount(n_rows)
+            self.data_table.setColumnCount(n_cols)
+            
+            # Set column headers
+            headers = [str(i) for i in range(n_cols)]
+            self.data_table.setHorizontalHeaderLabels(headers)
+            
+            for i in range(n_rows):
+                for j in range(n_cols):
+                    self.data_table.setItem(i, j, QTableWidgetItem(self._format_value(data[i, j])))
+            
+            truncated = []
+            if data.shape[0] > self.MAX_DISPLAY_ROWS:
+                truncated.append(f"rows: {self.MAX_DISPLAY_ROWS}/{data.shape[0]:,}")
+            if data.shape[1] > self.MAX_DISPLAY_COLS:
+                truncated.append(f"cols: {self.MAX_DISPLAY_COLS}/{data.shape[1]:,}")
+            
+            if truncated:
+                self.status_label.setText(f"Showing {', '.join(truncated)}")
+            else:
+                self.status_label.setText(f"{data.shape[0]:,} × {data.shape[1]:,}")
+        else:
+            # >2D array - show flattened or message
+            self.data_table.setRowCount(1)
+            self.data_table.setColumnCount(1)
+            self.data_table.setItem(0, 0, QTableWidgetItem(f"Array with shape {data.shape}"))
+            self.status_label.setText(f"Data has {data.ndim} dimensions. Table view limited to 1D/2D.")
+        
+        # Resize columns to content
+        self.data_table.resizeColumnsToContents()
+
+    def _format_value(self, value):
+        """Format a single value for display."""
+        if isinstance(value, (np.complexfloating, complex)):
+            return f"{value.real:.6g}{value.imag:+.6g}j"
+        elif isinstance(value, (np.floating, float)):
+            if abs(value) < 1e-3 or abs(value) > 1e6:
+                return f"{value:.6e}"
+            return f"{value:.6g}"
+        elif isinstance(value, (np.integer, int)):
+            return str(value)
+        elif isinstance(value, bytes):
+            try:
+                return value.decode('utf-8')
+            except:
+                return str(value)
+        else:
+            return str(value)
+
+    def closeEvent(self, event):
+        """Clean up when dialog closes."""
+        if self._h5file:
+            try:
+                self._h5file.close()
+            except:
+                pass
+        super().closeEvent(event)
+
+    def reject(self):
+        """Clean up when dialog is rejected."""
+        if self._h5file:
+            try:
+                self._h5file.close()
+            except:
+                pass
+        super().reject()
 
 
 class HDF5DataSource:
@@ -2364,10 +3275,21 @@ class HDF5DataSource:
         return None
 
     def get_axes(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        xs = self.file[self.spec.x_key][:] * self.spec.x_scale
+        # Handle custom X axis
+        if self.spec.x_key == '__custom__' and self.spec.x_custom_points:
+            xs = np.linspace(self.spec.x_custom_start, self.spec.x_custom_stop, 
+                            self.spec.x_custom_points) * self.spec.x_scale
+        else:
+            xs = self.file[self.spec.x_key][:] * self.spec.x_scale
+        
         ys = None
         if self.spec.y_key:
-            ys = self.file[self.spec.y_key][:] * self.spec.y_scale
+            # Handle custom Y axis
+            if self.spec.y_key == '__custom__' and self.spec.y_custom_points:
+                ys = np.linspace(self.spec.y_custom_start, self.spec.y_custom_stop,
+                                self.spec.y_custom_points) * self.spec.y_scale
+            else:
+                ys = self.file[self.spec.y_key][:] * self.spec.y_scale
         return xs, ys
 
     def get_data(self) -> np.ndarray:
@@ -2519,8 +3441,259 @@ class StitchedDataSource:
                          ).translate({ord(c): None for c in '{}"'})
 
 
+class DatDataSource:
+    """Manages .dat file access using qtplot."""
+
+    def __init__(self, file_path: str, spec: Optional[DatSpec] = None):
+        from qtplot.data import DatFile
+        
+        self.file_path = file_path
+        self._dat = DatFile(filename=file_path)
+        
+        # Use provided spec or create default
+        if spec is not None:
+            x_col = spec.x_col
+            y_col = spec.y_col
+            z_col = spec.z_col
+            is_2d = spec.is_2d
+            x_scale = getattr(spec, 'x_scale', 1.0)
+            y_scale = getattr(spec, 'y_scale', 1.0)
+            # Custom axis parameters
+            x_custom_start = getattr(spec, 'x_custom_start', None)
+            x_custom_stop = getattr(spec, 'x_custom_stop', None)
+            x_custom_points = getattr(spec, 'x_custom_points', None)
+            y_custom_start = getattr(spec, 'y_custom_start', None)
+            y_custom_stop = getattr(spec, 'y_custom_stop', None)
+            y_custom_points = getattr(spec, 'y_custom_points', None)
+        else:
+            # Auto-detect with defaults
+            x_col = 0
+            y_col = 1
+            z_col = 3
+            is_2d = self._dat.labels[1] != 'ychannel_()' if len(self._dat.labels) > 1 else False
+            x_scale = 1.0
+            y_scale = 1.0
+            x_custom_start, x_custom_stop, x_custom_points = None, None, None
+            y_custom_start, y_custom_stop, y_custom_points = None, None, None
+        
+        self._x_col = x_col
+        self._y_col = y_col
+        self._z_col = z_col
+        self._is_2d = is_2d
+        
+        # Extract axes and data
+        if is_2d:
+            # Handle custom X axis
+            if x_col == -1 and x_custom_points:
+                self.xs = np.linspace(x_custom_start, x_custom_stop, x_custom_points) * x_scale
+            else:
+                self.xs = self._dat.data.T[x_col][:self._dat.sizes[self._dat.ids[0]]] * x_scale
+            
+            # Handle custom Y axis
+            if y_col == -1 and y_custom_points:
+                self.ys = np.linspace(y_custom_start, y_custom_stop, y_custom_points) * y_scale
+            else:
+                self.ys = np.unique(self._dat.data.T[y_col]) * y_scale
+            
+            self._data = self._dat.data.T[z_col].reshape((len(self.ys), len(self.xs)))
+        else:
+            # Handle custom X axis (1D)
+            if x_col == -1 and x_custom_points:
+                self.xs = np.linspace(x_custom_start, x_custom_stop, x_custom_points) * x_scale
+            else:
+                self.xs = self._dat.data.T[x_col] * x_scale
+            self.ys = None
+            self._data = self._dat.data.T[z_col]
+        
+        # Create/update spec with labels from qtplot (if spec was provided, update labels if empty)
+        if spec is not None:
+            self.spec = DatSpec(
+                x_col=x_col,
+                y_col=y_col,
+                z_col=z_col,
+                x_label=spec.x_label if spec.x_label else (self._dat.labels[x_col] if x_col >= 0 and x_col < len(self._dat.labels) else 'X'),
+                y_label=spec.y_label if spec.y_label else (self._dat.labels[y_col] if is_2d and y_col >= 0 and y_col < len(self._dat.labels) else 'Y'),
+                data_label=spec.data_label if spec.data_label else (self._dat.labels[z_col] if z_col < len(self._dat.labels) else ''),
+                is_2d=is_2d,
+                x_scale=x_scale,
+                y_scale=y_scale,
+                x_custom_start=x_custom_start,
+                x_custom_stop=x_custom_stop,
+                x_custom_points=x_custom_points,
+                y_custom_start=y_custom_start,
+                y_custom_stop=y_custom_stop,
+                y_custom_points=y_custom_points
+            )
+        else:
+            self.spec = DatSpec(
+                x_col=x_col,
+                y_col=y_col,
+                z_col=z_col,
+                x_label=self._dat.labels[x_col] if x_col < len(self._dat.labels) else '',
+                y_label=self._dat.labels[y_col] if is_2d and y_col < len(self._dat.labels) else '',
+                data_label=self._dat.labels[z_col] if z_col < len(self._dat.labels) else '',
+                is_2d=is_2d
+            )
+        
+        # Store metadata
+        self.metadata = {
+            'Filename': self._dat.filename,
+            'Timestamp': str(self._dat.timestamp) if self._dat.timestamp else ''
+        }
+
+    def get_axes(self) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        return self.xs, self.ys
+
+    def get_data(self) -> np.ndarray:
+        return self._data
+
+    def close(self):
+        """No-op for dat files (already loaded into memory)."""
+        pass
+
+    @property
+    def title(self) -> str:
+        return os.path.basename(self.file_path)
+    
+    @property
+    def file_info(self) -> str:
+        """Returns filename | datetime string for display."""
+        filename = os.path.basename(self.file_path)
+        timestamp = self.metadata.get('Timestamp', '')
+        if timestamp:
+            return f"{filename}  |  {timestamp}"
+        return filename
+
+    @property
+    def metadata_str(self) -> str:
+        return json.dumps(self.metadata, indent=2, separators=('', ': ')
+                         ).translate({ord(c): None for c in '{}"'})
+
+
+class StitchedDatDataSource:
+    """Data source for stitched 2D .dat files - stores multiple datasets."""
+    
+    def __init__(self, datasets: List[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+                 spec: DatSpec, metadata: dict, file_paths: List[str]):
+        """
+        Args:
+            datasets: List of (xs, ys, data) tuples, one per file
+            spec: DatSpec for the dat file type
+            metadata: Metadata from first file
+            file_paths: List of file paths
+        """
+        self.datasets = datasets  # List of (xs, ys, data) tuples
+        self.spec = spec
+        self.metadata = metadata.copy()
+        self.file_paths = file_paths
+        self.file_path = file_paths[0]  # Primary file
+        self.visibility = [True] * len(datasets)  # Track visibility per file
+        
+        # Update metadata to indicate stitching
+        self.metadata['Stitched'] = f"{len(file_paths)} files"
+        self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in file_paths])
+        
+        # Compute combined axis ranges across all datasets
+        self._update_combined_limits()
+        
+        # For compatibility with existing code, expose first dataset's axes
+        self.xs = datasets[0][0]
+        self.ys = datasets[0][1]
+    
+    def _update_combined_limits(self):
+        """Recompute combined axis limits from visible datasets."""
+        visible_datasets = [d for d, v in zip(self.datasets, self.visibility) if v]
+        if visible_datasets:
+            all_xs = np.concatenate([d[0] for d in visible_datasets])
+            all_ys = np.concatenate([d[1] for d in visible_datasets])
+            self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
+            self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+        else:
+            # Fallback if nothing visible
+            all_xs = np.concatenate([d[0] for d in self.datasets])
+            all_ys = np.concatenate([d[1] for d in self.datasets])
+            self._combined_xlim = (float(np.min(all_xs)), float(np.max(all_xs)))
+            self._combined_ylim = (float(np.min(all_ys)), float(np.max(all_ys)))
+    
+    def set_visibility(self, index: int, visible: bool):
+        """Set visibility of a stitched file."""
+        if 0 <= index < len(self.visibility):
+            self.visibility[index] = visible
+            self._update_combined_limits()
+    
+    def add_file(self, xs: np.ndarray, ys: np.ndarray, data: np.ndarray, file_path: str):
+        """Add a new file to the stitch."""
+        self.datasets.append((xs, ys, data))
+        self.file_paths.append(file_path)
+        self.visibility.append(True)
+        self._update_combined_limits()
+        # Update metadata
+        self.metadata['Stitched'] = f"{len(self.file_paths)} files"
+        self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in self.file_paths])
+    
+    def remove_file(self, index: int):
+        """Remove a file from the stitch by index."""
+        if 0 <= index < len(self.datasets) and len(self.datasets) > 1:
+            del self.datasets[index]
+            del self.file_paths[index]
+            del self.visibility[index]
+            self._update_combined_limits()
+            # Update metadata
+            self.metadata['Stitched'] = f"{len(self.file_paths)} files"
+            self.metadata['Source Files'] = ', '.join([os.path.basename(f) for f in self.file_paths])
+            # Update primary file if needed
+            self.file_path = self.file_paths[0]
+            self.xs = self.datasets[0][0]
+            self.ys = self.datasets[0][1]
+    
+    def close(self):
+        """No-op for stitched data (in-memory, nothing to close)."""
+        pass
+    
+    def is_stitched(self) -> bool:
+        """Return True to indicate this is stitched data."""
+        return True
+    
+    def get_axes(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return first dataset's axes for compatibility."""
+        return self.datasets[0][0], self.datasets[0][1]
+    
+    def get_data(self) -> np.ndarray:
+        """Return first dataset's data for compatibility."""
+        return self.datasets[0][2]
+    
+    def get_all_datasets(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Get all (xs, ys, data) tuples for stitched plotting."""
+        return self.datasets
+    
+    def get_visible_datasets(self) -> List[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """Get only visible (xs, ys, data) tuples for stitched plotting."""
+        return [d for d, v in zip(self.datasets, self.visibility) if v]
+    
+    def get_combined_xlim(self) -> Tuple[float, float]:
+        """Get combined x-axis limits across all datasets."""
+        return self._combined_xlim
+    
+    def get_combined_ylim(self) -> Tuple[float, float]:
+        """Get combined y-axis limits across all datasets."""
+        return self._combined_ylim
+    
+    @property
+    def file_info(self) -> str:
+        return f"Stitched: {len(self.file_paths)} .dat files"
+    
+    @property
+    def title(self) -> str:
+        return f"Stitched: {len(self.file_paths)} .dat files"
+    
+    @property
+    def metadata_str(self) -> str:
+        return json.dumps(self.metadata, indent=2, separators=('', ': ')
+                         ).translate({ord(c): None for c in '{}"'})
+
+
 class StitchDropArea(QListWidget):
-    """Drop area for HDF5 files to stitch."""
+    """Drop area for HDF5 and .dat files to stitch."""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2538,12 +3711,17 @@ class StitchDropArea(QListWidget):
                 border-color: #666;
             }
         """)
+        self._allowed_extensions = ('.h5', '.hdf5', '.dat')  # Can be restricted
+        
+    def set_allowed_extensions(self, extensions: tuple):
+        """Set which file extensions are allowed."""
+        self._allowed_extensions = extensions
         
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            # Check if any files are .h5
+            # Check if any files match allowed extensions
             for url in event.mimeData().urls():
-                if url.toLocalFile().endswith('.h5'):
+                if url.toLocalFile().endswith(self._allowed_extensions):
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -2558,7 +3736,7 @@ class StitchDropArea(QListWidget):
         if event.mimeData().hasUrls():
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                if file_path.endswith('.h5'):
+                if file_path.endswith(self._allowed_extensions):
                     # Check if already in list
                     existing = [self.item(i).data(Qt.UserRole) for i in range(self.count())]
                     if file_path not in existing:
@@ -3987,6 +5165,8 @@ class PlotWidget2D(QWidget):
         # Derivative mode state
         self._show_derivative = False
         self._derivative_smoothing = 0  # 0 = no smoothing
+        self._show_y_derivative = False
+        self._y_derivative_smoothing = 0  # 0 = no smoothing
         
         # Overlay state
         self._overlays: List[OverlayData] = []
@@ -4928,6 +6108,23 @@ class PlotWidget2D(QWidget):
             if self._show_derivative:
                 self.update_plot()
     
+    def set_y_derivative_mode(self, enabled: bool):
+        """Enable or disable y-derivative plotting mode (2D only)."""
+        if self._show_y_derivative != enabled:
+            self._show_y_derivative = enabled
+            # Clear fits when switching modes
+            self.clear_fit()
+            self._resonator_fitter = None
+            self.update_plot()
+    
+    def set_y_derivative_smoothing(self, window: int):
+        """Set the smoothing window for y-derivative computation."""
+        if self._y_derivative_smoothing != window:
+            self._y_derivative_smoothing = window
+            # Only update if y-derivative mode is on
+            if self._show_y_derivative:
+                self.update_plot()
+    
     def add_overlay(self, overlay: OverlayData):
         """Add an overlay trace."""
         self._overlays.append(overlay)
@@ -5084,6 +6281,21 @@ class PlotWidget2D(QWidget):
                                     zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
                         else:
                             zs = np.gradient(zs, xs, axis=1)
+                    # Apply y-derivative if enabled
+                    if self._show_y_derivative:
+                        if self._y_derivative_smoothing > 0:
+                            from scipy.signal import savgol_filter
+                            window = self._y_derivative_smoothing
+                            if window % 2 == 0:
+                                window += 1
+                            if window > zs.shape[0]:
+                                window = zs.shape[0] if zs.shape[0] % 2 == 1 else zs.shape[0] - 1
+                            if window >= 3:
+                                dy = np.mean(np.abs(np.diff(ys)))
+                                if dy > 0:
+                                    zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dy, axis=0)
+                        else:
+                            zs = np.gradient(zs, ys, axis=0)
                     all_mins.append(float(np.nanmin(zs)))
                     all_maxs.append(float(np.nanmax(zs)))
                 return min(all_mins), max(all_maxs)
@@ -5095,6 +6307,36 @@ class PlotWidget2D(QWidget):
                 zs = transform(data)
                 # Convert Inf to NaN, then use nanmin/nanmax to ignore NaN values
                 zs = np.where(np.isinf(zs), np.nan, zs)
+                # Apply x-derivative if enabled
+                if self._show_derivative:
+                    if self._derivative_smoothing > 0:
+                        from scipy.signal import savgol_filter
+                        window = self._derivative_smoothing
+                        if window % 2 == 0:
+                            window += 1
+                        if window > zs.shape[1]:
+                            window = zs.shape[1] if zs.shape[1] % 2 == 1 else zs.shape[1] - 1
+                        if window >= 3:
+                            dx = np.mean(np.abs(np.diff(self.xs)))
+                            if dx > 0:
+                                zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dx, axis=1)
+                    else:
+                        zs = np.gradient(zs, self.xs, axis=1)
+                # Apply y-derivative if enabled
+                if self._show_y_derivative:
+                    if self._y_derivative_smoothing > 0:
+                        from scipy.signal import savgol_filter
+                        window = self._y_derivative_smoothing
+                        if window % 2 == 0:
+                            window += 1
+                        if window > zs.shape[0]:
+                            window = zs.shape[0] if zs.shape[0] % 2 == 1 else zs.shape[0] - 1
+                        if window >= 3:
+                            dy = np.mean(np.abs(np.diff(self.ys)))
+                            if dy > 0:
+                                zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dy, axis=0)
+                    else:
+                        zs = np.gradient(zs, self.ys, axis=0)
                 return float(np.nanmin(zs)), float(np.nanmax(zs))
         except:
             return 0.0, 1.0
@@ -5230,12 +6472,30 @@ class PlotWidget2D(QWidget):
                         else:
                             zs = np.gradient(zs, xs, axis=1)
                     
+                    # Apply derivative along y-axis if enabled
+                    if self._show_y_derivative:
+                        if self._y_derivative_smoothing > 0:
+                            from scipy.signal import savgol_filter
+                            window = self._y_derivative_smoothing
+                            if window % 2 == 0:
+                                window += 1
+                            if window > zs.shape[0]:
+                                window = zs.shape[0] if zs.shape[0] % 2 == 1 else zs.shape[0] - 1
+                            if window >= 3:
+                                dy = np.mean(np.abs(np.diff(ys)))
+                                if dy > 0:
+                                    zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dy, axis=0)
+                        else:
+                            zs = np.gradient(zs, ys, axis=0)
+                    
                     pcm = self.ax_2d.pcolormesh(xs, ys, zs,
                                                  cmap=self.settings.colormap, norm=norm)
                 
                 # Update ylabel for derivative (outside loop, applies to all)
                 if self._show_derivative:
                     ylabel = f"d({ylabel})/d({self.data_source.spec.x_label})"
+                elif self._show_y_derivative:
+                    ylabel = f"d({ylabel})/d({self.data_source.spec.y_label})"
             else:
                 # Single dataset: use cached data
                 if self._cached_plot_data is None:
@@ -5279,6 +6539,31 @@ class PlotWidget2D(QWidget):
                     
                     # Update ylabel to indicate derivative
                     ylabel = f"d({ylabel})/d({self.data_source.spec.x_label})"
+                
+                # Apply derivative along y-axis if enabled (not in Argand mode)
+                if self._show_y_derivative and not self._argand_mode:
+                    # Get y-coordinates for derivative
+                    y_coords = self.ys
+                    
+                    # Apply derivative along axis=0 (y-axis direction)
+                    if self._y_derivative_smoothing > 0:
+                        from scipy.signal import savgol_filter
+                        window = self._y_derivative_smoothing
+                        if window % 2 == 0:
+                            window += 1
+                        if window > zs.shape[0]:
+                            window = zs.shape[0] if zs.shape[0] % 2 == 1 else zs.shape[0] - 1
+                        if window >= 3:
+                            dy = np.mean(np.abs(np.diff(y_coords)))
+                            if dy > 0:
+                                # Apply savgol_filter along axis=0 for each column
+                                zs = savgol_filter(zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dy, axis=0)
+                    else:
+                        # Use numpy gradient
+                        zs = np.gradient(zs, y_coords, axis=0)
+                    
+                    # Update ylabel to indicate derivative
+                    ylabel = f"d({ylabel})/d({self.data_source.spec.y_label})"
 
                 y_idx = min(y_idx, zs.shape[0] - 1) if zs.ndim > 1 else 0
                 x_idx = min(x_idx, zs.shape[1] - 1) if zs.ndim > 1 else min(x_idx, len(zs) - 1)
@@ -5499,6 +6784,22 @@ class PlotWidget2D(QWidget):
                                     else:
                                         overlay_zs = np.gradient(overlay_zs, overlay.xs, axis=1)
                                 
+                                # Apply y-derivative if enabled
+                                if self._show_y_derivative:
+                                    if self._y_derivative_smoothing > 0:
+                                        from scipy.signal import savgol_filter
+                                        window = self._y_derivative_smoothing
+                                        if window % 2 == 0:
+                                            window += 1
+                                        if window > overlay_zs.shape[0]:
+                                            window = overlay_zs.shape[0] if overlay_zs.shape[0] % 2 == 1 else overlay_zs.shape[0] - 1
+                                        if window >= 3:
+                                            dy = np.mean(np.abs(np.diff(overlay.ys)))
+                                            if dy > 0:
+                                                overlay_zs = savgol_filter(overlay_zs, window_length=window, polyorder=min(3, window-1), deriv=1, delta=dy, axis=0)
+                                    else:
+                                        overlay_zs = np.gradient(overlay_zs, overlay.ys, axis=0)
+                                
                                 # Get slice at same index (if within bounds)
                                 if overlay_zs.shape[0] > y_idx:
                                     self.ax_xcut.plot(overlay.xs, overlay_zs[y_idx], 
@@ -5666,6 +6967,7 @@ class Plotter(QMainWindow):
         self._current_fit_result = None  # Stores current fit result for copy
         self._current_resonator_result = None  # Stores current resonator fit result
         self._stitch_spec = None  # Stores spec for stitch validation
+        self._dat_spec = None  # Stores DatSpec for .dat file handling
 
         self._setup_ui()
         self.setAcceptDrops(True)
@@ -5775,6 +7077,14 @@ class Plotter(QMainWindow):
         self.shortcuts_btn.clicked.connect(self._show_shortcuts_cheatsheet)
         top_bar.addWidget(self.shortcuts_btn)
         
+        # HDF5 browser button (table icon, only visible for HDF5 files)
+        self.hdf5_browser_btn = QPushButton("☷")  # Trigram symbol as table icon
+        self.hdf5_browser_btn.setFixedSize(32, 32)
+        self.hdf5_browser_btn.setToolTip("Browse HDF5 Structure")
+        self.hdf5_browser_btn.clicked.connect(self._show_hdf5_browser)
+        self.hdf5_browser_btn.hide()  # Hidden by default
+        top_bar.addWidget(self.hdf5_browser_btn)
+        
         # Toggle sidebar button (on the right)
         self.toggle_btn = QPushButton("☰")
         self.toggle_btn.setFixedSize(32, 32)
@@ -5785,7 +7095,7 @@ class Plotter(QMainWindow):
         content_layout.addLayout(top_bar)
 
         # Drop zone
-        self.drop_label = QLabel("Drag and drop your HDF5 file here\n\n(Shift+Drop to add as overlay)")
+        self.drop_label = QLabel("Drag and drop your HDF5 or .dat file here\n\n(Shift+Drop to add as overlay)")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setStyleSheet(
             "border: 2px dashed #aaa; padding: 40px; font-size: 20px; color: #666;"
@@ -5851,6 +7161,8 @@ class Plotter(QMainWindow):
         # Derivative mode callbacks
         self.sidebar.set_callback('derivative_toggled', self._on_derivative_toggled)
         self.sidebar.set_callback('derivative_smoothing_changed', self._on_derivative_smoothing_changed)
+        self.sidebar.set_callback('y_derivative_toggled', self._on_y_derivative_toggled)
+        self.sidebar.set_callback('y_derivative_smoothing_changed', self._on_y_derivative_smoothing_changed)
         # Fitting callbacks
         self.sidebar.set_callback('fit_visible', self._on_fit_visible)
         self.sidebar.set_callback('fit_all', self._on_fit_all)
@@ -5874,6 +7186,20 @@ class Plotter(QMainWindow):
     def _toggle_sidebar(self):
         self.sidebar_visible = not self.sidebar_visible
         self.sidebar.setVisible(self.sidebar_visible)
+
+    def _show_hdf5_browser(self):
+        """Show HDF5 structure browser dialog."""
+        if not self.data_source or not hasattr(self.data_source, 'file_path'):
+            return
+        
+        # Only for HDF5 files (not stitched, not .dat)
+        if isinstance(self.data_source, DatDataSource):
+            return
+        if hasattr(self.data_source, 'is_stitched') and self.data_source.is_stitched():
+            return
+        
+        dialog = HDF5BrowserDialog(self.data_source.file_path, parent=self)
+        dialog.exec_()
 
     def _show_shortcuts_cheatsheet(self):
         """Show a modal overlay with keyboard shortcuts cheatsheet."""
@@ -6336,16 +7662,149 @@ class Plotter(QMainWindow):
             self.plot_widget.update_plot()
 
     def _on_stitch_files(self):
-        """Open dialog to stitch multiple HDF5 files together."""
-        dialog = StitchDialog(self)
+        """Open dialog to stitch multiple files together."""
+        # Check if current data source is .dat or HDF5
+        if hasattr(self, '_dat_spec') and self._dat_spec is not None:
+            # Current file is .dat - stitch .dat files
+            self._on_stitch_dat_files()
+        else:
+            # Current file is HDF5 - stitch HDF5 files
+            dialog = StitchDialog(self)
+            
+            if dialog.exec_() == QDialog.Accepted and dialog.stitch_files:
+                self._perform_stitch(dialog.stitch_files, dialog.detected_spec)
+
+    def _on_stitch_dat_files(self):
+        """Open file picker to stitch multiple .dat files."""
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select .dat Files to Stitch", "", "DAT Files (*.dat)")
         
-        if dialog.exec_() == QDialog.Accepted and dialog.stitch_files:
-            self._perform_stitch(dialog.stitch_files, dialog.detected_spec)
+        if not file_paths or len(file_paths) < 2:
+            if file_paths and len(file_paths) == 1:
+                QMessageBox.information(self, "Stitch", "Please select at least 2 files to stitch.")
+            return
+        
+        self._perform_dat_stitch(file_paths)
+    
+    def _perform_dat_stitch(self, stitch_files: List[str]):
+        """Combine data from multiple .dat files."""
+        try:
+            from qtplot.data import DatFile
+        except ImportError:
+            QMessageBox.critical(self, "Missing Dependency",
+                "qtplot is required for .dat files.\nInstall with: pip install qtplot")
+            return
+        
+        try:
+            # Close existing data source if any
+            if self.data_source and hasattr(self.data_source, 'close'):
+                self.data_source.close()
+            
+            # Clear any existing overlays
+            self.sidebar.clear_overlay_list()
+            
+            # Get spec from first file (or use stored _dat_spec)
+            spec = self._dat_spec if hasattr(self, '_dat_spec') and self._dat_spec else DatSpec()
+            
+            # Load all sources and collect datasets
+            datasets = []  # List of (xs, ys, data) tuples
+            metadata = None
+            
+            for file_path in stitch_files:
+                dat = DatFile(filename=file_path)
+                
+                # Check if 2D
+                is_2d = dat.labels[1] != 'ychannel_()'
+                if not is_2d:
+                    QMessageBox.warning(self, "Stitch Error",
+                        f"File '{os.path.basename(file_path)}' is 1D. Only 2D files can be stitched.")
+                    return
+                
+                xs = dat.data.T[spec.x_col][:dat.sizes[dat.ids[0]]]
+                ys = np.unique(dat.data.T[spec.y_col])
+                data = dat.data.T[spec.z_col].reshape((len(ys), len(xs)))
+                datasets.append((xs.copy(), ys.copy(), data.copy()))
+                
+                # Get metadata from first file
+                if metadata is None:
+                    metadata = {
+                        'Filename': dat.filename,
+                        'Timestamp': str(dat.timestamp) if dat.timestamp else ''
+                    }
+            
+            # Create a stitched data source
+            new_data_source = StitchedDatDataSource(
+                datasets, spec, metadata, stitch_files
+            )
+            
+            # Store stitch spec for validating drops
+            self._stitch_spec = spec
+            self._dat_spec = spec  # Keep track that we're in .dat mode
+            
+            # Now recreate the plot widget
+            if self.update_timer:
+                self.update_timer.stop()
+            if self.plot_widget:
+                self.plot_container.removeWidget(self.plot_widget)
+                self.plot_widget.deleteLater()
+            
+            self.data_source = new_data_source
+            
+            # Use generic transforms for .dat files
+            transforms = DataTransforms.get_generic_transforms()
+            
+            # Always 2D for stitch
+            self.plot_widget = PlotWidget2D(self.data_source, transforms, self.settings)
+            vmin, vmax = self.plot_widget.get_current_data_range()
+            self.sidebar.update_scale_range(vmin, vmax)
+            
+            self.plot_widget.set_zoom_completed_callback(self._on_zoom_completed)
+            
+            self.drop_label.hide()
+            self.file_info_label.setText(self.data_source.file_info)
+            self.sidebar.set_transforms(transforms)
+            self.sidebar.set_metadata(self.data_source.metadata_str)
+            self.sidebar.set_2d_mode(True)
+            
+            # Disable live updates for stitched data
+            self.sidebar.live_checkbox.setChecked(False)
+            self.sidebar.live_checkbox.setEnabled(False)
+            self.sidebar.live_checkbox.setToolTip("Live updates not available for stitched data")
+            
+            # Disable linecuts for stitched data
+            self.sidebar.linecuts_checkbox.setChecked(False)
+            self.sidebar.linecuts_checkbox.setEnabled(False)
+            self.sidebar.linecuts_checkbox.setToolTip("Linecuts not available for stitched data")
+            
+            # Disable Argand mode for stitched data
+            self.sidebar.argand_checkbox.setChecked(False)
+            self.sidebar.argand_checkbox.setEnabled(False)
+            self.sidebar.argand_checkbox.setToolTip("Argand mode not available for stitched data")
+            
+            # Enable stitch mode (disables overlay button)
+            self.sidebar.set_stitch_mode(True)
+            
+            # Show stitch list manager
+            self.sidebar.update_stitch_list(stitch_files)
+            
+            # Restrict stitch drop area to .dat files only
+            self.sidebar.stitch_container.set_allowed_extensions(('.dat',))
+            
+            # Hide HDF5 browser button for stitched data
+            self.hdf5_browser_btn.hide()
+            
+            self.plot_container.addWidget(self.plot_widget)
+            self.plot_widget.update_plot()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Stitch Error", f"Failed to stitch .dat files:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def _on_add_overlay(self):
         """Open file picker to add an overlay."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Add Overlay", "", "HDF5 Files (*.h5 *.hdf5)")
+            self, "Add Overlay", "", "Data Files (*.h5 *.hdf5 *.dat);;HDF5 Files (*.h5 *.hdf5);;DAT Files (*.dat)")
         
         if file_path:
             self._add_overlay_from_file(file_path)
@@ -6356,56 +7815,98 @@ class Plotter(QMainWindow):
             QMessageBox.warning(self, "No Plot", "Please load a main file first.")
             return
         
+        ext = os.path.splitext(file_path)[1].lower()
+        
         try:
-            # Phase 1: Detect experiment type
-            spec = None
-            with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
-                # Read metadata to detect experiment type (same as stitch/load_file)
+            if ext == '.dat':
+                # Handle .dat file overlay
                 try:
-                    metadata = json.loads(f['Metadata'][()].decode('utf-8'))
-                except:
-                    metadata = {'Expt ID': os.path.basename(file_path)}
+                    from qtplot.data import DatFile
+                except ImportError:
+                    QMessageBox.critical(self, "Missing Dependency",
+                        "qtplot is required for .dat files.\nInstall with: pip install qtplot")
+                    return
                 
-                expt_id = metadata.get('Expt ID', '')
+                dat = DatFile(filename=file_path)
                 
-                # Find matching experiment type
-                expt_type = None
-                for exp_name in EXPERIMENT_REGISTRY:
-                    if exp_name in expt_id:
-                        expt_type = exp_name
-                        break
+                # Detect 1D vs 2D
+                is_overlay_2d = dat.labels[1] != 'ychannel_()'
                 
-                if expt_type is not None:
-                    spec = EXPERIMENT_REGISTRY[expt_type]
-            
-            # If unknown, open axis selection dialog (file is closed now)
-            if spec is None:
-                dialog = AxisSelectionDialog(file_path, self)
-                if dialog.exec_() != QDialog.Accepted:
-                    return  # User cancelled
-                spec = dialog.get_spec()
-            
-            # Determine if 1D or 2D
-            is_overlay_2d = spec.y_key is not None
-            
-            # Check dimensionality match
-            main_is_2d = isinstance(self.plot_widget, PlotWidget2D)
-            
-            if is_overlay_2d != main_is_2d:
-                dim_main = "2D" if main_is_2d else "1D"
-                dim_overlay = "2D" if is_overlay_2d else "1D"
-                QMessageBox.warning(self, "Dimension Mismatch",
-                                    f"Cannot overlay {dim_overlay} data on {dim_main} plot.")
-                return
-            
-            # Phase 2: Load data
-            with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
-                xs = np.array(f[spec.x_key]) * spec.x_scale
-                ys = None
+                # Check dimensionality match
+                main_is_2d = isinstance(self.plot_widget, PlotWidget2D)
+                
+                if is_overlay_2d != main_is_2d:
+                    dim_main = "2D" if main_is_2d else "1D"
+                    dim_overlay = "2D" if is_overlay_2d else "1D"
+                    QMessageBox.warning(self, "Dimension Mismatch",
+                                        f"Cannot overlay {dim_overlay} data on {dim_main} plot.")
+                    return
+                
+                # Load data using default columns (0, 1, 3)
+                x_col, y_col, z_col = 0, 1, 3
                 if is_overlay_2d:
-                    ys = np.array(f[spec.y_key]) * spec.y_scale
+                    xs = dat.data.T[x_col][:dat.sizes[dat.ids[0]]]
+                    ys = np.unique(dat.data.T[y_col])
+                    data = dat.data.T[z_col].reshape((len(ys), len(xs)))
+                else:
+                    xs = dat.data.T[x_col]
+                    ys = None
+                    data = dat.data.T[z_col]
                 
-                data = np.array(f[spec.data_key])
+                x_label = dat.labels[x_col] if x_col < len(dat.labels) else ''
+                
+            else:
+                # Handle HDF5 file overlay
+                spec = None
+                with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                    # Read metadata to detect experiment type
+                    try:
+                        metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+                    except:
+                        metadata = {'Expt ID': os.path.basename(file_path)}
+                    
+                    expt_id = metadata.get('Expt ID', '')
+                    
+                    # Find matching experiment type
+                    expt_type = None
+                    for exp_name in EXPERIMENT_REGISTRY:
+                        if exp_name in expt_id:
+                            expt_type = exp_name
+                            break
+                    
+                    if expt_type is not None:
+                        spec = EXPERIMENT_REGISTRY[expt_type]
+                
+                # If unknown, open axis selection dialog
+                if spec is None:
+                    dialog = AxisSelectionDialog(file_path, self)
+                    if dialog.exec_() != QDialog.Accepted:
+                        return  # User cancelled
+                    spec = dialog.get_spec()
+                
+                # Determine if 1D or 2D
+                is_overlay_2d = spec.y_key is not None
+                
+                # Check dimensionality match
+                main_is_2d = isinstance(self.plot_widget, PlotWidget2D)
+                
+                if is_overlay_2d != main_is_2d:
+                    dim_main = "2D" if main_is_2d else "1D"
+                    dim_overlay = "2D" if is_overlay_2d else "1D"
+                    QMessageBox.warning(self, "Dimension Mismatch",
+                                        f"Cannot overlay {dim_overlay} data on {dim_main} plot.")
+                    return
+                
+                # Load data
+                with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                    xs = np.array(f[spec.x_key]) * spec.x_scale
+                    ys = None
+                    if is_overlay_2d:
+                        ys = np.array(f[spec.y_key]) * spec.y_scale
+                    
+                    data = np.array(f[spec.data_key])
+                
+                x_label = spec.x_label
             
             # Assign color from palette
             num_overlays = len(self.plot_widget.get_overlays())
@@ -6421,7 +7922,7 @@ class Plotter(QMainWindow):
                 color=color,
                 visible=True,
                 source_path=file_path,
-                x_label=spec.x_label,
+                x_label=x_label,
                 is_2d=is_overlay_2d
             )
             
@@ -6533,10 +8034,14 @@ class Plotter(QMainWindow):
         
         # Clear stitch state
         self._stitch_spec = None
+        self._dat_spec = None  # Reset .dat spec
         
         # Clear sidebar
         self.sidebar.clear_stitch_list()
         self.sidebar.set_stitch_mode(False)
+        
+        # Reset stitch drop area to accept all file types
+        self.sidebar.stitch_container.set_allowed_extensions(('.h5', '.hdf5', '.dat'))
         
         # Re-enable live updates and linecuts checkboxes
         self.sidebar.live_checkbox.setEnabled(True)
@@ -6559,34 +8064,70 @@ class Plotter(QMainWindow):
         if not spec:
             return
         
+        # Determine if we're in .dat or HDF5 stitch mode
+        is_dat_stitch = isinstance(spec, DatSpec)
+        
         for file_path in file_paths:
             try:
-                # Validate file
-                with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
-                    # Check experiment type matches
-                    try:
-                        metadata = json.loads(f['Metadata'][()].decode('utf-8'))
-                    except:
-                        metadata = {'Expt ID': os.path.basename(file_path)}
+                # Check file extension matches stitch mode
+                ext = os.path.splitext(file_path)[1].lower()
+                if is_dat_stitch and ext != '.dat':
+                    QMessageBox.warning(self, "Wrong File Type",
+                        f"Cannot add {os.path.basename(file_path)}:\n"
+                        f"Only .dat files can be added to this stitch.")
+                    continue
+                elif not is_dat_stitch and ext not in ('.h5', '.hdf5'):
+                    QMessageBox.warning(self, "Wrong File Type",
+                        f"Cannot add {os.path.basename(file_path)}:\n"
+                        f"Only HDF5 files can be added to this stitch.")
+                    continue
+                
+                # Check if file already in stitch
+                if file_path in self.data_source.file_paths:
+                    continue  # Skip duplicates silently
+                
+                if is_dat_stitch:
+                    # Handle .dat file
+                    from qtplot.data import DatFile
+                    dat = DatFile(filename=file_path)
                     
-                    expt_id = metadata.get('Expt ID', '')
-                    
-                    # Find matching experiment type
-                    file_expt_type = None
-                    for exp_name in EXPERIMENT_REGISTRY:
-                        if exp_name in expt_id:
-                            file_expt_type = exp_name
-                            break
-                    
-                    if file_expt_type is None:
-                        QMessageBox.warning(self, "Unknown Experiment",
-                                            f"Cannot add {os.path.basename(file_path)}:\n"
-                                            f"Unknown experiment type (Expt ID: {expt_id})")
+                    # Check if 2D
+                    is_2d = dat.labels[1] != 'ychannel_()'
+                    if not is_2d:
+                        QMessageBox.warning(self, "Dimension Mismatch",
+                            f"Cannot add {os.path.basename(file_path)}:\n"
+                            f"Only 2D files can be stitched.")
                         continue
                     
-                    # Check if file already in stitch
-                    if file_path in self.data_source.file_paths:
-                        continue  # Skip duplicates silently
+                    xs = dat.data.T[spec.x_col][:dat.sizes[dat.ids[0]]]
+                    ys = np.unique(dat.data.T[spec.y_col])
+                    data = dat.data.T[spec.z_col].reshape((len(ys), len(xs)))
+                    
+                    # Add to stitch
+                    self.data_source.add_file(xs.copy(), ys.copy(), data.copy(), file_path)
+                else:
+                    # Handle HDF5 file
+                    with h5py.File(file_path, 'r', libver='latest', swmr=True) as f:
+                        # Check experiment type matches
+                        try:
+                            metadata = json.loads(f['Metadata'][()].decode('utf-8'))
+                        except:
+                            metadata = {'Expt ID': os.path.basename(file_path)}
+                        
+                        expt_id = metadata.get('Expt ID', '')
+                        
+                        # Find matching experiment type
+                        file_expt_type = None
+                        for exp_name in EXPERIMENT_REGISTRY:
+                            if exp_name in expt_id:
+                                file_expt_type = exp_name
+                                break
+                        
+                        if file_expt_type is None:
+                            QMessageBox.warning(self, "Unknown Experiment",
+                                                f"Cannot add {os.path.basename(file_path)}:\n"
+                                                f"Unknown experiment type (Expt ID: {expt_id})")
+                            continue
                     
                     # Load data
                     source = HDF5DataSource(file_path, spec)
@@ -6901,6 +8442,20 @@ class Plotter(QMainWindow):
         if self.plot_widget:
             self.plot_widget.set_derivative_smoothing(window)
     
+    def _on_y_derivative_toggled(self, enabled: bool):
+        """Handle y-derivative mode toggle (2D only)."""
+        # Update sidebar UI (disable fitting when derivative is on)
+        self.sidebar.set_derivative_mode(enabled)
+        
+        # Update plot widget
+        if self.plot_widget and hasattr(self.plot_widget, 'set_y_derivative_mode'):
+            self.plot_widget.set_y_derivative_mode(enabled)
+    
+    def _on_y_derivative_smoothing_changed(self, window: int):
+        """Handle y-derivative smoothing window change."""
+        if self.plot_widget and hasattr(self.plot_widget, 'set_y_derivative_smoothing'):
+            self.plot_widget.set_y_derivative_smoothing(window)
+    
     def _on_copy_fit_results(self):
         """Copy fit results to clipboard."""
         # Check for resonator results first
@@ -7038,6 +8593,12 @@ class Plotter(QMainWindow):
             # Show stitch list manager
             self.sidebar.update_stitch_list(file_paths)
             
+            # Restrict stitch drop area to HDF5 files only
+            self.sidebar.stitch_container.set_allowed_extensions(('.h5', '.hdf5'))
+            
+            # Hide HDF5 browser button for stitched data
+            self.hdf5_browser_btn.hide()
+            
             self.plot_container.addWidget(self.plot_widget)
             self.plot_widget.update_plot()
             # Don't start live updates for stitched data
@@ -7123,13 +8684,26 @@ class Plotter(QMainWindow):
             QMessageBox.information(self, "Configure Axes", 
                 "Axis configuration is not available for stitched data.")
             return
-        dialog = AxisSelectionDialog(
-            self.data_source.file, self.data_source.metadata,
-            self.data_source.spec, parent=self)
-        if dialog.exec_() == QDialog.Accepted and dialog.result_spec:
-            file_path = self.data_source.file_path
-            self.data_source.close()
-            self._setup_plot(file_path, dialog.result_spec)
+        
+        # Check if this is a .dat file
+        if isinstance(self.data_source, DatDataSource):
+            dialog = DatAxisSelectionDialog(
+                self.data_source.file_path, 
+                current_spec=self.data_source.spec, 
+                parent=self)
+            if dialog.exec_() == QDialog.Accepted and dialog.result_spec:
+                file_path = self.data_source.file_path
+                self.data_source.close()
+                self._setup_dat_plot(file_path, dialog.result_spec)
+        else:
+            # HDF5 file
+            dialog = AxisSelectionDialog(
+                self.data_source.file, self.data_source.metadata,
+                self.data_source.spec, parent=self)
+            if dialog.exec_() == QDialog.Accepted and dialog.result_spec:
+                file_path = self.data_source.file_path
+                self.data_source.close()
+                self._setup_plot(file_path, dialog.result_spec)
 
     def _copy_to_clipboard(self):
         fig = self._get_figure()
@@ -7214,6 +8788,7 @@ class Plotter(QMainWindow):
         pw = self.plot_widget
         is_2d = hasattr(pw, 'ax_2d')
         is_stitched = hasattr(self.data_source, 'is_stitched') and self.data_source.is_stitched()
+        is_dat = isinstance(self.data_source.spec, DatSpec)
         
         # Get current transform info
         transform_label = pw.transforms[pw._current_transform][0]
@@ -7238,7 +8813,10 @@ class Plotter(QMainWindow):
         # === IMPORTS ===
         lines.append("import numpy as np")
         lines.append("import matplotlib.pyplot as plt")
-        lines.append("import h5py")
+        if is_dat:
+            lines.append("from qtplot.data import DatFile")
+        else:
+            lines.append("import h5py")
         
         if is_2d:
             if self.settings.norm_type == 'power':
@@ -7301,10 +8879,16 @@ class Plotter(QMainWindow):
                 lines.append("")
             lines.append("datasets = []")
             lines.append("for fpath in stitch_files:")
-            lines.append("    with h5py.File(fpath, 'r') as f:")
-            lines.append(f"        xs = f['{spec.x_key}'][:]")
-            lines.append(f"        ys = f['{spec.y_key}'][:]")
-            lines.append(f"        data = f['{spec.data_key}'][:]")
+            if is_dat:
+                lines.append("    dat = DatFile(filename=fpath)")
+                lines.append(f"    xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]")
+                lines.append(f"    ys = np.unique(dat.data.T[{spec.y_col}])")
+                lines.append(f"    data = dat.data.T[{spec.z_col}].reshape((len(ys), len(xs)))")
+            else:
+                lines.append("    with h5py.File(fpath, 'r') as f:")
+                lines.append(f"        xs = f['{spec.x_key}'][:]")
+                lines.append(f"        ys = f['{spec.y_key}'][:]")
+                lines.append(f"        data = f['{spec.data_key}'][:]")
             if has_rotation:
                 lines.append("    data = rotate_s21(data)")
             if has_normalize:
@@ -7317,11 +8901,20 @@ class Plotter(QMainWindow):
         else:
             # Single file mode
             lines.append("# Load data")
-            lines.append(f"with h5py.File(r\"{self.data_source.file_path}\", 'r') as f:")
-            lines.append(f"    xs = f['{spec.x_key}'][:]")
-            if is_2d:
-                lines.append(f"    ys = f['{spec.y_key}'][:]")
-            lines.append(f"    data = f['{spec.data_key}'][:]")
+            if is_dat:
+                lines.append(f"dat = DatFile(filename=r\"{self.data_source.file_path}\")")
+                lines.append(f"xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]" if is_2d else f"xs = dat.data.T[{spec.x_col}]")
+                if is_2d:
+                    lines.append(f"ys = np.unique(dat.data.T[{spec.y_col}])")
+                    lines.append(f"data = dat.data.T[{spec.z_col}].reshape((len(ys), len(xs)))")
+                else:
+                    lines.append(f"data = dat.data.T[{spec.z_col}]")
+            else:
+                lines.append(f"with h5py.File(r\"{self.data_source.file_path}\", 'r') as f:")
+                lines.append(f"    xs = f['{spec.x_key}'][:]")
+                if is_2d:
+                    lines.append(f"    ys = f['{spec.y_key}'][:]")
+                lines.append(f"    data = f['{spec.data_key}'][:]")
             lines.append("")
             
             # Rotation
@@ -7711,8 +9304,8 @@ class Plotter(QMainWindow):
             lines.append("    return amplitude * np.exp(-x / tau) + offset")
             func_call = "exponential_decay"
         elif model_name == 'Sin Exp Decay':
-            lines.append("def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):")
-            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset")
+            lines.append("def sin_exp_decay(x, amplitude, tau, wavelength, phase, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * x / wavelength + phase) + offset")
             func_call = "sin_exp_decay"
         elif model_name == 'Linear':
             lines.append("def linear(x, slope, intercept):")
@@ -7774,8 +9367,8 @@ class Plotter(QMainWindow):
             lines.append("    return amplitude * np.exp(-x / tau) + offset")
             func_call = "exponential_decay"
         elif model_name == 'Sin Exp Decay':
-            lines.append("def sin_exp_decay(x, amplitude, tau, frequency, phase, offset):")
-            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * frequency * x + phase) + offset")
+            lines.append("def sin_exp_decay(x, amplitude, tau, wavelength, phase, offset):")
+            lines.append("    return amplitude * np.exp(-x / tau) * np.sin(2 * np.pi * x / wavelength + phase) + offset")
             func_call = "sin_exp_decay"
         elif model_name == 'Linear':
             lines.append("def linear(x, slope, intercept):")
@@ -7816,6 +9409,37 @@ class Plotter(QMainWindow):
         return lines
 
     def load_file(self, file_path: str):
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        if ext == '.dat':
+            self._load_dat_file(file_path)
+        elif ext in ('.h5', '.hdf5'):
+            self._load_hdf5_file(file_path)
+        else:
+            self.drop_label.setText(f"Unsupported file type: {ext}")
+            self.drop_label.show()
+    
+    def _load_dat_file(self, file_path: str):
+        """Load a .dat file using qtplot."""
+        try:
+            from qtplot.data import DatFile
+        except ImportError:
+            QMessageBox.critical(self, "Missing Dependency",
+                "qtplot is required for .dat files.\nInstall with: pip install qtplot")
+            return
+        
+        try:
+            # Auto-detect and load directly (no dialog)
+            # DatDataSource will auto-detect 1D/2D and use default columns (0, 1, 3)
+            first_load = self.plot_widget is None
+            self._setup_dat_plot(file_path, spec=None, first_load=first_load)
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.drop_label.setText(f"Error loading .dat file:\n{e}\n\n{tb}")
+            self.drop_label.show()
+    
+    def _load_hdf5_file(self, file_path: str):
+        """Load an HDF5 file."""
         try:
             temp_file = h5py.File(file_path, 'r', libver='latest', swmr=True)
             try:
@@ -7848,6 +9472,101 @@ class Plotter(QMainWindow):
             tb = traceback.format_exc()
             self.drop_label.setText(f"Error loading file:\n{e}\n\n{tb}")
             self.drop_label.show()
+
+    def _setup_dat_plot(self, file_path: str, spec: Optional[DatSpec] = None, first_load: bool = False):
+        """Setup plot for a .dat file."""
+        if self.data_source:
+            self.data_source.close()
+        if self.update_timer:
+            self.update_timer.stop()
+        if self.plot_widget:
+            self.plot_container.removeWidget(self.plot_widget)
+            self.plot_widget.deleteLater()
+
+        self.data_source = DatDataSource(file_path, spec)
+        self._dat_spec = self.data_source.spec  # Store for stitching
+        
+        # Use generic transforms for .dat files
+        transforms = DataTransforms.get_generic_transforms()
+
+        is_2d = self.data_source.spec.is_2d
+
+        if is_2d:
+            self.plot_widget = PlotWidget2D(self.data_source, transforms, self.settings)
+            if first_load:
+                self.resize(1600, 900)
+            # Initialize scale range from data
+            vmin, vmax = self.plot_widget.get_current_data_range()
+            self.sidebar.update_scale_range(vmin, vmax)
+        else:
+            self.plot_widget = PlotWidget1D(self.data_source, transforms, self.settings)
+            if first_load:
+                self.resize(1200, 600)
+
+        # Sync settings with actual figure size
+        fig_size = self.plot_widget.figure.get_size_inches()
+        self.settings.fig_width = fig_size[0]
+        self.settings.fig_height = fig_size[1]
+
+        # Set up zoom completed callback to uncheck the zoom button
+        self.plot_widget.set_zoom_completed_callback(self._on_zoom_completed)
+
+        self.drop_label.hide()
+        self.file_info_label.setText(self.data_source.file_info)
+        self.sidebar.set_transforms(transforms)
+        self.sidebar.set_metadata(self.data_source.metadata_str)
+        self.sidebar.set_2d_mode(is_2d)
+        
+        # Clear fit display (new file loaded)
+        self.sidebar.clear_fit_display()
+        self._current_fit_result = None
+        self._current_resonator_result = None
+        
+        # Clear overlays (new file loaded)
+        self.sidebar.clear_overlay_list()
+        
+        # Clear stitch state (new file loaded)
+        self.sidebar.clear_stitch_list()
+        self.sidebar.set_stitch_mode(False)
+        self._stitch_spec = None
+        
+        # Sync Argand mode with sidebar state
+        if self.sidebar._argand_mode:
+            self.plot_widget.set_argand_mode(True)
+        
+        # Sync derivative mode with sidebar state
+        if self.sidebar.derivative_checkbox.isChecked():
+            self.plot_widget.set_derivative_mode(True)
+            self.plot_widget.set_derivative_smoothing(self.sidebar.derivative_smoothing_spin.value())
+        
+        # Disable live updates for .dat files (not supported)
+        self.sidebar.live_checkbox.setChecked(False)
+        self.sidebar.live_checkbox.setEnabled(False)
+        self.sidebar.live_checkbox.setToolTip("Live updates not available for .dat files")
+        
+        # Re-enable linecuts
+        self.sidebar.linecuts_checkbox.setEnabled(True)
+        self.sidebar.linecuts_checkbox.setToolTip("")
+        
+        # Re-enable Argand mode
+        self.sidebar.argand_checkbox.setEnabled(True)
+        self.sidebar.argand_checkbox.setToolTip("Plot Re[S21] vs Im[S21] - useful for resonator visualization")
+        
+        # Set z-label from spec if provided
+        if self.data_source.spec.data_label:
+            self.sidebar.z_label_edit.setText(self.data_source.spec.data_label)
+            self.settings.z_label_text = self.data_source.spec.data_label
+            if not is_2d:
+                self.settings.y_label_text = self.data_source.spec.data_label
+        else:
+            self.sidebar.z_label_edit.setText("")
+            self.settings.z_label_text = ""
+        
+        # Hide HDF5 browser button for .dat files
+        self.hdf5_browser_btn.hide()
+
+        self.plot_container.addWidget(self.plot_widget)
+        self.plot_widget.update_plot()
 
     def _setup_plot(self, file_path: str, spec: ExperimentSpec, first_load: bool = False):
         if self.data_source:
@@ -7908,6 +9627,7 @@ class Plotter(QMainWindow):
         self.sidebar.clear_stitch_list()
         self.sidebar.set_stitch_mode(False)
         self._stitch_spec = None
+        self._dat_spec = None  # Clear .dat spec when loading HDF5
         
         # Sync Argand mode with sidebar state
         if self.sidebar._argand_mode:
@@ -7940,6 +9660,9 @@ class Plotter(QMainWindow):
         else:
             self.sidebar.z_label_edit.setText("")
             self.settings.z_label_text = ""
+        
+        # Show HDF5 browser button for HDF5 files (not stitched)
+        self.hdf5_browser_btn.show()
 
         self.plot_container.addWidget(self.plot_widget)
         self.plot_widget.update_plot()
