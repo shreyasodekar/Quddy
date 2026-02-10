@@ -1,3 +1,3 @@
-__all__=['fitter', 'helper','Programs']  #enter .py files here. This only affectts import *
-
-#import .py files from submodules. All this will get imported by "import Quddy"
+from .LoopbackPrograms import *
+from .helper import *
+from .fitter import *

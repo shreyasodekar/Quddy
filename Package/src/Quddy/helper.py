@@ -120,13 +120,13 @@ def get_fridge_snapshot(Proteox):
     return snapshot
 
 def rotate_s21(data):
-    angles = np.linspace(0, 2 * np.pi, 360)
+    angles = np.linspace(0, 2 * np.pi, 1000)
     variances = [np.var(np.imag(data * np.exp(-1j * angle))) for angle in angles]
     optimal_angle = angles[np.argmin(variances)]
 
     rotated_data = data * np.exp(-1j * optimal_angle)
-    new_angle = np.angle(np.mean(rotated_data))
-    if np.pi/2 < np.abs(new_angle)< np.pi:
+    new_angle = np.angle(np.mean(rotated_data), deg=True)
+    if new_angle>90 or new_angle<-90:
         rotated_data = rotated_data*np.exp(1j * np.pi)
         
     return rotated_data
