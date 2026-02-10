@@ -1,3 +1,5 @@
+Use_Raverager = True
+
 # Open the Config file
 pwd = os.path.dirname(__file__)
 with open(pwd + '\\config.json','r+') as f:
@@ -36,17 +38,27 @@ f.swmr_mode = True
 switch.channels[0].switch(2)
 switch.channels[1].switch(2)
 #Actual Measurement
-for y in tqdm(range(len(y_pts))):
-    ivvi._set_dac(12, y_pts[y]/5)
-    for x in range(len(x_pts)):
-        config['qubit']['frequency'] = x_pts[x]
-        prog = Programs.ConstantPulseProbe(soccfg, config)
-        # prog = Programs.GaussianPulseProbe(soccfg, config)
-        avgi, avgq = prog.acquire(soc, progress=False)
-        data[y,x] = avgi[0][0]+1j*avgq[0][0]
+if Use_Raverager:
+    for y in tqdm(range(len(y_pts))):
+        ivvi._set_dac(12, y_pts[y]/5)
+        prog = LoopbackPrograms.TwoToneSpectroscopy.TwoToneSpectroscopyProgram(soccfg, config)
+        _, avgi, avgq = prog.acquire(soc, progress=False)
+        data[y] = avgi[0][0]+1j*avgq[0][0]
         f['S21'][:] = data
-        snapshot[y,x] = get_fridge_snapshot(Proteox)
+        snapshot[y,:] = get_fridge_snapshot(Proteox)
         f['Fridge snapshot'] = snapshot
+else:
+    for y in tqdm(range(len(y_pts))):
+        ivvi._set_dac(12, y_pts[y]/5)
+        for x in range(len(x_pts)):
+            config['qubit']['frequency'] = x_pts[x]
+            prog = Programs.ConstantPulseProbe(soccfg, config)
+            # prog = Programs.GaussianPulseProbe(soccfg, config)
+            avgi, avgq = prog.acquire(soc, progress=False)
+            data[y,x] = avgi[0][0]+1j*avgq[0][0]
+            f['S21'][:] = data
+            snapshot[y,x] = get_fridge_snapshot(Proteox)
+            f['Fridge snapshot'] = snapshot
             
 # Plot results.
 fig = plt.figure(figsize=(16,6))

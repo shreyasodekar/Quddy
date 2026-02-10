@@ -1,3 +1,8 @@
+from Package.src.Quddy.helper import generate_empty_snapshot_array
+
+
+Use_Raverager = True
+
 # Open the Config file
 pwd = os.path.dirname(__file__)
 with open(pwd + '\\config.json','r+') as f:
@@ -14,7 +19,7 @@ expt_cfg = {'start': 8176,
             'points': 500
             }
 
-x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
+x_pts = helper.set_sweep(config, expt_cfg['start'], expt_cfg['stop'], expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
 snapshot = generate_empty_snapshot_array(len(x_pts),0)
 
@@ -28,23 +33,25 @@ f.swmr_mode = True
 
 switch.channels[0].switch(2)
 switch.channels[1].switch(2)
-# ivvi._set_dac(10, config['V_gate']['2'])
-# ivvi._set_dac(11, config['V_gate']['5'])
-# ivvi._set_dac(12, config['V_gate']['4']/5)
-# ivvi._set_dac(13, config['V_gate']['5'])
-# print('V_g2 = '+str(ivvi._get_dac(10))+ ' mV')
-# time.sleep(1)
 
 #Actual Measurement
-for x in tqdm(range(len(x_pts))):
-    config['resonator']['frequency'] = x_pts[x]
-    prog = Programs.SingleTone(soccfg, config)
-    # prog = Programs.ConstantPulseProbe(soccfg, config)
-    avgi, avgq = prog.acquire(soc, progress=False)
-    data[x] = avgi[0][0]+1j*avgq[0][0]
+if Use_Raverager:
+    prog = LoopbackPrograms.ResonatorSpectroscopy.ResonatorSpectroscopyProgram(soccfg, config)
+    _, avgi, avgq = prog.acquire(soc, progress=True)
+    data = avgi[0,0]+1j*avgq[0,0]
     f['S21'][:] = data
-    snapshot[x] = get_fridge_snapshot(Proteox)
+    snapshot[:] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
+else:
+    for x in tqdm(range(len(x_pts))):
+        config['resonator']['frequency'] = x_pts[x]
+        prog = Programs.SingleTone(soccfg, config)
+        # prog = Programs.ConstantPulseProbe(soccfg, config)
+        avgi, avgq = prog.acquire(soc, progress=False)
+        data[x] = avgi[0][0]+1j*avgq[0][0]
+        f['S21'][:] = data
+        snapshot[x] = get_fridge_snapshot(Proteox)
+        f['Fridge snapshot'] = snapshot
         
 # popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[x_pts[np.argmin(np.abs(data))], -5, -40, 1] )
 # # popt, pcov = curve_fit(fitter.lorentzian, x_pts, np.abs(data), p0=[x_pts[np.argmin(np.abs(data))], -0.8, -0.2, 2] )
@@ -59,8 +66,7 @@ for x in tqdm(range(len(x_pts))):
 # Plot results
 fig = plt.figure(figsize=(16,6))
 plt.subplot(121,title="Resonator Spectroscopy", xlabel="Frequency (MHz)", ylabel="Amp. (adc level)")
-plt.plot(x_pts, np.log10(np.abs(data))*20)
-# plt.plot(x_pts, np.abs(data),'.-')
+plt.plot(x_pts, np.abs(data),'.-')
 # plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
 fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
 plt.savefig(path+'/'+filename.split('.')[0]+'.png')

@@ -1,3 +1,7 @@
+from Scripts.connect_instruments import Proteox
+
+
+Use_Raverager = True
 # Open the Config file
 pwd = os.path.dirname(__file__)
 with open(pwd + '\\config.json','r+') as f:
@@ -17,7 +21,7 @@ expt_cfg = {'start': 0,
             'points': 50
             }
 
-x_pts = np.linspace(expt_cfg['start'],expt_cfg['stop'],expt_cfg['points'])
+x_pts = helper.set_sweep(config, expt_cfg['start'], expt_cfg['stop'], expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
 snapshot = generate_empty_snapshot_array(len(x_pts),0)
 
@@ -32,14 +36,22 @@ f.swmr_mode = True
 switch.channels[0].switch(2)
 switch.channels[1].switch(2)
 #Actual Measurement
-for x in tqdm(range(len(x_pts))):
-    config['qubit']['dephase_time'] = x_pts[x]
-    prog = Programs.Ramsey(soccfg, config)
-    avgi, avgq = prog.acquire(soc, progress=False)
-    data[x] = avgi[0][0]+1j*avgq[0][0]
+if Use_Raverager:
+    prog = LoopbackPrograms.Ramsey.RamseyProgram(soccfg, config)
+    _, avgi, avgq = prog.acquire(soc, progress=False)
+    data = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
-    snapshot[x] = get_fridge_snapshot(Proteox)
+    snapshot[:] = get_fridge_snapshot(Proteox)
     f['Fridge snapshot'] = snapshot
+else:
+    for x in tqdm(range(len(x_pts))):
+        config['qubit']['dephase_time'] = x_pts[x]
+        prog = Programs.Ramsey(soccfg, config)
+        avgi, avgq = prog.acquire(soc, progress=False)
+        data[x] = avgi[0][0]+1j*avgq[0][0]
+        f['S21'][:] = data
+        snapshot[x] = get_fridge_snapshot(Proteox)
+        f['Fridge snapshot'] = snapshot
 
 data  = rotate_s21(data)
 

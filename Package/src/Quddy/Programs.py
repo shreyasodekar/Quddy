@@ -1,5 +1,6 @@
 from qick import *
-
+import ctypes
+import numpy as np
 
 class SingleTone(AveragerProgram):
     def initialize(self):
@@ -523,3 +524,210 @@ class CPMG4(AveragerProgram):
               adc_trig_offset=self.cfg['adc_trig_offset'],
               wait=True,
               syncdelay=self.us2cycles(self.cfg['relax_delay']))
+        
+
+def CWTwoToneTriggered(pna, mxg, pna_pwr, pna_start_freq, pna_stop_freq,
+                     mxg_pwr, mxg_start, mxg_stop,
+                     num_avg=10, num_pts=5):
+    """Synchronized PNA + MXG two-tone measurement.
+
+    The PNA acts as master, sending a TTL pulse from Aux 1 before each point
+    to step the MXG through its frequency list. Returns averaged S21 as a
+    complex array.
+
+    Parameters
+    ----------
+    pna : KeysightP9374A
+        VNA instrument object.
+    mxg : KeysightN5183B
+        Signal generator instrument object.
+    pna_pwr : float
+        PNA source power (dBm).
+    pna_start_freq, pna_stop_freq : float
+        PNA readout frequency range (Hz).
+    mxg_pwr : float
+        MXG source power (dBm).
+    mxg_start, mxg_stop : float
+        MXG drive frequency range (Hz).
+    num_avg : int
+        Number of averages. Default 10.
+    num_pts : int
+        Number of sweep points. Default 5.
+
+    Returns
+    -------
+    s21 : np.ndarray (complex)
+        Averaged S21 data, length = num_pts.
+    """
+
+    # --- 1. MXG Setup (Follower) ---
+    mxg.write(':FREQ:MODE FIX')                 # Reset to allow config changes
+    mxg.write(f':POW {mxg_pwr}')
+    mxg.write(f':FREQ:START {mxg_start}')
+    mxg.write(f':FREQ:STOP {mxg_stop}')
+    mxg.write(f':SWE:POIN {num_pts}')
+    mxg.write(':LIST:TYPE STEP')                # Linear step sweep
+    mxg.write(':SWE:DWEL 0')                    # Step immediately on trigger
+    mxg.write(':LIST:TRIG:SOUR EXT')            # Wait for rear BNC pulse from PNA
+    mxg.write(':TRIG:SWE:SOUR IMM')             # Auto-reset to start of list
+    mxg.write(':FREQ:MODE SWE')                 # Enable sweep mode
+    mxg.write(':OUTP ON')                        # Turn RF on
+    mxg.ask('*OPC?')                             # Wait until MXG is ready
+
+    # --- 2. PNA Setup (Master) ---
+    pna.power(pna_pwr)
+    pna.start(pna_start_freq)
+    pna.stop(pna_stop_freq)
+    pna.points(num_pts)
+
+    # Averaging
+    pna.write(f'SENS1:AVER:COUN {num_avg}')
+    pna.write(f'SENS1:SWE:GRO:COUN {num_avg}')
+    pna.write('SENS1:AVER:STAT ON')
+    pna.write('SENS1:AVER:CLE')
+
+    # Aux 1 trigger output — pulse before each point to step MXG
+    pna.write('TRIG:CHAN1:AUX1 ON')
+    pna.write('TRIG:CHAN1:AUX1:INT POIN')        # Trigger per point
+    pna.write('TRIG:CHAN1:AUX1:POS BEF')         # Pulse before PNA measures
+    pna.write('TRIG:CHAN1:AUX1:DUR 0.01')       # 10 ms pulse duration
+    pna.write('TRIG:CHAN1:AUX1:OPOL POS')        # Positive TTL polarity
+    pna.write('SENS1:SWE:DWEL 0.05')            # 50 ms dwell for MXG settling
+
+    # Manual trigger so we can do a controlled group sweepwha
+    pna.write('TRIG:SOUR MAN')
+    pna.ask('*OPC?')                              # Wait until PNA is ready
+
+    # --- 3. Run the measurement ---
+    pna.write('SENS1:SWE:GRO:SING')              # Initiate group sweep (num_avg sweeps)
+    pna.ask('*OPC?')                              # Wait until all averages complete
+
+    # --- 4. Retrieve data ---
+    raw = pna.ask('CALC1:DATA? SDATA')            # Alternating real, imag pairs
+    values = np.array(raw.split(','), dtype=float)
+    s21 = values[0::2] + 1j * values[1::2]
+
+    # --- 5. Cleanup ---
+    mxg.write(':OUTP OFF')
+    pna.write('TRIG:CHAN1:AUX1 OFF')
+
+    return s21
+
+
+def CWTwoToneTriggered_SC5511A(pna, sc, pna_pwr, pna_freq,
+                              sc_pwr, sc_start, sc_stop,
+                              num_avg=10, num_pts=5):
+    """Synchronized PNA + SignalCore SC5511A two-tone measurement.
+
+    The PNA is parked at a single readout frequency (resonator) while the
+    SC5511A sweeps through a qubit drive frequency range. The PNA acts as
+    master, sending a TTL pulse from Aux 1 before each point to step the
+    SC5511A via its hardware trigger input.
+
+    Parameters
+    ----------
+    pna : KeysightP9374A
+        VNA instrument object.
+    sc : SC5511A
+        SignalCore SC5511A instrument object (QCoDeS driver).
+    pna_pwr : float
+        PNA source power (dBm).
+    pna_freq : float
+        PNA readout frequency (Hz) — fixed at the resonator.
+    sc_pwr : float
+        SC5511A output power (dBm).
+    sc_start, sc_stop : float
+        SC5511A drive frequency range (Hz).
+    num_avg : int
+        Number of averages. Default 10.
+    num_pts : int
+        Number of sweep points. Default 5.
+
+    Returns
+    -------
+    s21 : np.ndarray (complex)
+        Averaged S21 data, length = num_pts.
+    """
+
+    step_freq = int((sc_stop - sc_start) / (num_pts - 1))
+    dll = sc._dll
+    sn = sc._serial_number
+
+    # --- 1. SC5511A Setup (Follower) ---
+    sc.power(sc_pwr)
+    sc.frequency(sc_start)
+
+    # Open device for sweep configuration
+    handle = ctypes.c_void_p(dll.sc5511a_open_device(sn))
+
+    # Set sweep frequency parameters
+    dll.sc5511a_set_freq(handle, ctypes.c_ulonglong(int(sc_start)))
+
+    # Configure RF params for sweep
+    rf_params = sc._rf_params
+    rf_params.start_freq = ctypes.c_ulonglong(int(sc_start))
+    rf_params.stop_freq = ctypes.c_ulonglong(int(sc_stop))
+    rf_params.step_freq = ctypes.c_ulonglong(step_freq)
+    rf_params.sweep_dwell_time = ctypes.c_uint(0)       # Step immediately on trigger
+    rf_params.sweep_cycles = ctypes.c_uint(0)            # Continuous until stopped
+
+    # Configure list mode — step on hardware trigger, return to start
+    list_mode = sc._list_mode
+    list_mode.sss_mode = ctypes.c_ubyte(1)               # Enable sweep mode
+    list_mode.sweep_dir = ctypes.c_ubyte(0)              # Forward
+    list_mode.tri_waveform = ctypes.c_ubyte(0)           # No triangular
+    list_mode.hw_trigger = ctypes.c_ubyte(1)             # Enable hardware trigger
+    list_mode.step_on_hw_trig = ctypes.c_ubyte(1)        # Step one freq per pulse
+    list_mode.return_to_start = ctypes.c_ubyte(1)        # Reset after full sweep
+    list_mode.trig_out_enable = ctypes.c_ubyte(0)        # No trigger output
+    list_mode.trig_out_on_cycle = ctypes.c_ubyte(0)
+
+    dll.sc5511a_list_mode_config(handle, ctypes.byref(list_mode))
+
+    # Set RF mode to sweep (1) and enable output
+    dll.sc5511a_set_rf_mode(handle, ctypes.c_ubyte(1))
+    dll.sc5511a_set_output(handle, ctypes.c_ubyte(1))
+
+    dll.sc5511a_close_device(handle)
+
+    # --- 2. PNA Setup (Master) ---
+    pna.power(pna_pwr)
+    pna.start(pna_freq)                          # Park at resonator frequency
+    pna.stop(pna_freq)                           # Same — PNA doesn't move
+    pna.points(num_pts)
+
+    # Averaging
+    pna.write(f'SENS1:AVER:COUN {num_avg}')
+    pna.write(f'SENS1:SWE:GRO:COUN {num_avg}')
+    pna.write('SENS1:AVER:STAT ON')
+    pna.write('SENS1:AVER:CLE')
+
+    # Aux 1 trigger output — pulse before each point to step SC5511A
+    pna.write('TRIG:CHAN1:AUX1 ON')
+    pna.write('TRIG:CHAN1:AUX1:INT POIN')        # Trigger per point
+    pna.write('TRIG:CHAN1:AUX1:POS BEF')         # Pulse before PNA measures
+    pna.write('TRIG:CHAN1:AUX1:DUR 0.001')       # 1 ms pulse duration
+    pna.write('TRIG:CHAN1:AUX1:OPOL POS')        # Positive TTL polarity
+    pna.write('SENS1:SWE:DWEL 0.005')            # 5 ms dwell for settling
+
+    # Manual trigger for controlled group sweep
+    pna.write('TRIG:SOUR MAN')
+    pna.ask('*OPC?')                              # Wait until PNA is ready
+
+    # --- 3. Run the measurement ---
+    pna.write('SENS1:SWE:GRO:SING')              # Initiate group sweep
+    pna.ask('*OPC?')                              # Wait until all averages complete
+
+    # --- 4. Retrieve data ---
+    raw = pna.ask('CALC1:DATA? SDATA')            # Alternating real, imag pairs
+    values = np.array(raw.split(','), dtype=float)
+    s21 = values[0::2] + 1j * values[1::2]
+
+    # --- 5. Cleanup ---
+    handle = ctypes.c_void_p(dll.sc5511a_open_device(sn))
+    dll.sc5511a_set_output(handle, ctypes.c_ubyte(0))    # RF off
+    dll.sc5511a_set_rf_mode(handle, ctypes.c_ubyte(0))   # Back to single tone
+    dll.sc5511a_close_device(handle)
+    pna.write('TRIG:CHAN1:AUX1 OFF')
+
+    return s21
