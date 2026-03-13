@@ -61,6 +61,7 @@ class DroppableGroupBox(QGroupBox):
         self._drop_callback = None
         self._normal_style = ""
         self._highlight_style = ""
+        self._allowed_extensions = ('.h5', '.hdf5', '.dat')  # Can be restricted
     
     def set_drop_callback(self, callback):
         """Set callback for when files are dropped. Callback receives list of file paths."""
@@ -72,11 +73,15 @@ class DroppableGroupBox(QGroupBox):
         self._highlight_style = highlight
         self.setStyleSheet(normal)
     
+    def set_allowed_extensions(self, extensions: tuple):
+        """Set which file extensions are allowed."""
+        self._allowed_extensions = extensions
+    
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            # Check if any URL is an h5 or dat file
+            # Check if any URL matches allowed extensions
             for url in event.mimeData().urls():
-                if url.toLocalFile().endswith(('.h5', '.hdf5', '.dat')):
+                if url.toLocalFile().endswith(self._allowed_extensions):
                     event.acceptProposedAction()
                     self.setStyleSheet(self._highlight_style)
                     return
@@ -91,7 +96,7 @@ class DroppableGroupBox(QGroupBox):
             file_paths = []
             for url in event.mimeData().urls():
                 file_path = url.toLocalFile()
-                if file_path.endswith(('.h5', '.hdf5', '.dat')):
+                if file_path.endswith(self._allowed_extensions):
                     file_paths.append(file_path)
             if file_paths:
                 event.acceptProposedAction()
@@ -8799,6 +8804,7 @@ class Plotter(QMainWindow):
         has_rotation = hasattr(pw, '_rotate_s21') and pw._rotate_s21
         has_normalize = hasattr(pw, '_normalize') and pw._normalize
         has_derivative = hasattr(pw, '_show_derivative') and pw._show_derivative
+        has_y_derivative = hasattr(pw, '_show_y_derivative') and pw._show_y_derivative
         has_linecuts = is_2d and hasattr(pw, '_show_linecuts') and pw._show_linecuts
         has_overlays = hasattr(pw, '_overlays') and pw._overlays and any(o.visible for o in pw._overlays)
         has_callouts = hasattr(pw, '_callouts') and pw._callouts
@@ -8828,7 +8834,13 @@ class Plotter(QMainWindow):
             else:
                 lines.append("from matplotlib.colors import Normalize")
         
+        # Check for savgol_filter import (x or y derivative with smoothing)
+        needs_savgol = False
         if has_derivative and hasattr(pw, '_derivative_smoothing') and pw._derivative_smoothing > 0:
+            needs_savgol = True
+        if has_y_derivative and hasattr(pw, '_y_derivative_smoothing') and pw._y_derivative_smoothing > 0:
+            needs_savgol = True
+        if needs_savgol:
             lines.append("from scipy.signal import savgol_filter")
         
         if has_fit:
@@ -8880,14 +8892,22 @@ class Plotter(QMainWindow):
             lines.append("datasets = []")
             lines.append("for fpath in stitch_files:")
             if is_dat:
+                x_scale = getattr(spec, 'x_scale', 1.0)
+                y_scale = getattr(spec, 'y_scale', 1.0)
+                x_scale_str = f" * {x_scale}" if x_scale != 1.0 else ""
+                y_scale_str = f" * {y_scale}" if y_scale != 1.0 else ""
                 lines.append("    dat = DatFile(filename=fpath)")
-                lines.append(f"    xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]")
-                lines.append(f"    ys = np.unique(dat.data.T[{spec.y_col}])")
+                lines.append(f"    xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]{x_scale_str}")
+                lines.append(f"    ys = np.unique(dat.data.T[{spec.y_col}]){y_scale_str}")
                 lines.append(f"    data = dat.data.T[{spec.z_col}].reshape((len(ys), len(xs)))")
             else:
+                x_scale = getattr(spec, 'x_scale', 1.0)
+                y_scale = getattr(spec, 'y_scale', 1.0)
+                x_scale_str = f" * {x_scale}" if x_scale != 1.0 else ""
+                y_scale_str = f" * {y_scale}" if y_scale != 1.0 else ""
                 lines.append("    with h5py.File(fpath, 'r') as f:")
-                lines.append(f"        xs = f['{spec.x_key}'][:]")
-                lines.append(f"        ys = f['{spec.y_key}'][:]")
+                lines.append(f"        xs = f['{spec.x_key}'][:]{x_scale_str}")
+                lines.append(f"        ys = f['{spec.y_key}'][:]{y_scale_str}")
                 lines.append(f"        data = f['{spec.data_key}'][:]")
             if has_rotation:
                 lines.append("    data = rotate_s21(data)")
@@ -8895,7 +8915,9 @@ class Plotter(QMainWindow):
                 lines.append("    data = normalize_complex(data)")
             lines.append(f"    zs = {transform_code}")
             if has_derivative:
-                lines.extend(self._generate_derivative_code("    ", "zs", "xs"))
+                lines.extend(self._generate_derivative_code("    ", "zs", "xs", axis=1))
+            if has_y_derivative:
+                lines.extend(self._generate_derivative_code("    ", "zs", "ys", axis=0, is_y_derivative=True))
             lines.append("    datasets.append((xs, ys, zs))")
             lines.append("")
         else:
@@ -8903,17 +8925,59 @@ class Plotter(QMainWindow):
             lines.append("# Load data")
             if is_dat:
                 lines.append(f"dat = DatFile(filename=r\"{self.data_source.file_path}\")")
-                lines.append(f"xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]" if is_2d else f"xs = dat.data.T[{spec.x_col}]")
+                x_scale = getattr(spec, 'x_scale', 1.0)
+                y_scale = getattr(spec, 'y_scale', 1.0)
+                x_scale_str = f" * {x_scale}" if x_scale != 1.0 else ""
+                y_scale_str = f" * {y_scale}" if y_scale != 1.0 else ""
+                
+                # Handle custom X axis
+                x_custom_start = getattr(spec, 'x_custom_start', None)
+                x_custom_stop = getattr(spec, 'x_custom_stop', None)
+                x_custom_points = getattr(spec, 'x_custom_points', None)
+                if spec.x_col == -1 and x_custom_points:
+                    lines.append(f"xs = np.linspace({x_custom_start}, {x_custom_stop}, {x_custom_points}){x_scale_str}")
+                elif is_2d:
+                    lines.append(f"xs = dat.data.T[{spec.x_col}][:dat.sizes[dat.ids[0]]]{x_scale_str}")
+                else:
+                    lines.append(f"xs = dat.data.T[{spec.x_col}]{x_scale_str}")
+                
                 if is_2d:
-                    lines.append(f"ys = np.unique(dat.data.T[{spec.y_col}])")
+                    # Handle custom Y axis
+                    y_custom_start = getattr(spec, 'y_custom_start', None)
+                    y_custom_stop = getattr(spec, 'y_custom_stop', None)
+                    y_custom_points = getattr(spec, 'y_custom_points', None)
+                    if spec.y_col == -1 and y_custom_points:
+                        lines.append(f"ys = np.linspace({y_custom_start}, {y_custom_stop}, {y_custom_points}){y_scale_str}")
+                    else:
+                        lines.append(f"ys = np.unique(dat.data.T[{spec.y_col}]){y_scale_str}")
                     lines.append(f"data = dat.data.T[{spec.z_col}].reshape((len(ys), len(xs)))")
                 else:
                     lines.append(f"data = dat.data.T[{spec.z_col}]")
             else:
+                x_scale = getattr(spec, 'x_scale', 1.0)
+                y_scale = getattr(spec, 'y_scale', 1.0)
+                x_scale_str = f" * {x_scale}" if x_scale != 1.0 else ""
+                y_scale_str = f" * {y_scale}" if y_scale != 1.0 else ""
+                
+                # Handle custom X axis
+                x_custom_start = getattr(spec, 'x_custom_start', None)
+                x_custom_stop = getattr(spec, 'x_custom_stop', None)
+                x_custom_points = getattr(spec, 'x_custom_points', None)
+                
                 lines.append(f"with h5py.File(r\"{self.data_source.file_path}\", 'r') as f:")
-                lines.append(f"    xs = f['{spec.x_key}'][:]")
+                if spec.x_key == '__custom__' and x_custom_points:
+                    lines.append(f"    xs = np.linspace({x_custom_start}, {x_custom_stop}, {x_custom_points}){x_scale_str}")
+                else:
+                    lines.append(f"    xs = f['{spec.x_key}'][:]{x_scale_str}")
                 if is_2d:
-                    lines.append(f"    ys = f['{spec.y_key}'][:]")
+                    # Handle custom Y axis
+                    y_custom_start = getattr(spec, 'y_custom_start', None)
+                    y_custom_stop = getattr(spec, 'y_custom_stop', None)
+                    y_custom_points = getattr(spec, 'y_custom_points', None)
+                    if spec.y_key == '__custom__' and y_custom_points:
+                        lines.append(f"    ys = np.linspace({y_custom_start}, {y_custom_stop}, {y_custom_points}){y_scale_str}")
+                    else:
+                        lines.append(f"    ys = f['{spec.y_key}'][:]{y_scale_str}")
                 lines.append(f"    data = f['{spec.data_key}'][:]")
             lines.append("")
             
@@ -8955,8 +9019,14 @@ class Plotter(QMainWindow):
             
             # Derivative (not applicable for Argand mode)
             if has_derivative and not has_argand:
-                lines.append("# Derivative")
-                lines.extend(self._generate_derivative_code("", "zs", "xs"))
+                lines.append("# X-Derivative")
+                lines.extend(self._generate_derivative_code("", "zs", "xs", axis=1 if is_2d else None))
+                lines.append("")
+            
+            # Y-Derivative (only for 2D, not applicable for Argand mode)
+            if has_y_derivative and not has_argand and is_2d:
+                lines.append("# Y-Derivative")
+                lines.extend(self._generate_derivative_code("", "zs", "ys", axis=0, is_y_derivative=True))
                 lines.append("")
             
             # Overlays loading (not applicable for Argand mode)
@@ -8976,7 +9046,9 @@ class Plotter(QMainWindow):
                         lines.append(f"overlay{i}_data = normalize_complex(overlay{i}_data)")
                     lines.append(f"overlay{i}_zs = {transform_code.replace('data', f'overlay{i}_data')}")
                     if has_derivative:
-                        lines.extend(self._generate_derivative_code("", f"overlay{i}_zs", f"overlay{i}_xs"))
+                        lines.extend(self._generate_derivative_code("", f"overlay{i}_zs", f"overlay{i}_xs", axis=1 if overlay.is_2d else None))
+                    if has_y_derivative and overlay.is_2d:
+                        lines.extend(self._generate_derivative_code("", f"overlay{i}_zs", f"overlay{i}_ys", axis=0, is_y_derivative=True))
                 lines.append("")
         
         # === FIGURE SETUP ===
@@ -9243,18 +9315,35 @@ class Plotter(QMainWindow):
         
         return "\n".join(lines)
 
-    def _generate_derivative_code(self, indent: str, var_name: str, x_var: str) -> List[str]:
-        """Generate derivative computation code."""
+    def _generate_derivative_code(self, indent: str, var_name: str, x_var: str, axis: int = None, is_y_derivative: bool = False) -> List[str]:
+        """Generate derivative computation code.
+        
+        Args:
+            indent: Indentation string
+            var_name: Name of the variable to differentiate
+            x_var: Name of the coordinate variable (xs or ys)
+            axis: Axis for 2D data (1 for x-derivative, 0 for y-derivative, None for 1D)
+            is_y_derivative: If True, use y_derivative_smoothing instead of derivative_smoothing
+        """
         lines = []
         pw = self.plot_widget
-        smoothing = getattr(pw, '_derivative_smoothing', 0)
+        
+        if is_y_derivative:
+            smoothing = getattr(pw, '_y_derivative_smoothing', 0)
+        else:
+            smoothing = getattr(pw, '_derivative_smoothing', 0)
+        
+        axis_str = f", axis={axis}" if axis is not None else ""
         
         if smoothing > 0:
             window = smoothing if smoothing % 2 == 1 else smoothing + 1
             lines.append(f"{indent}dx = np.mean(np.abs(np.diff({x_var})))")
-            lines.append(f"{indent}{var_name} = savgol_filter({var_name}, window_length={window}, polyorder=min(3, {window}-1), deriv=1, delta=dx)")
+            if axis is not None:
+                lines.append(f"{indent}{var_name} = savgol_filter({var_name}, window_length={window}, polyorder=min(3, {window}-1), deriv=1, delta=dx, axis={axis})")
+            else:
+                lines.append(f"{indent}{var_name} = savgol_filter({var_name}, window_length={window}, polyorder=min(3, {window}-1), deriv=1, delta=dx)")
         else:
-            lines.append(f"{indent}{var_name} = np.gradient({var_name}, {x_var})")
+            lines.append(f"{indent}{var_name} = np.gradient({var_name}, {x_var}{axis_str})")
         
         return lines
 

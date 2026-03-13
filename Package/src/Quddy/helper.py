@@ -133,3 +133,9 @@ def rotate_s21(data):
 
 def f01estimate(fbare, fr, g):
     return fbare - g**2 /(fr - fbare)
+
+def set_sweep(cfg, start, stop, points):
+    cfg['start'] = start
+    cfg['step']  = (stop - start) / (points - 1)
+    cfg['expts'] = points
+    return np.linspace(start, stop, points)
