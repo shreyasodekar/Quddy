@@ -27,8 +27,8 @@ class QubitSpectroscopyProgram(RAveragerProgram):
 
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="qubit",
-                       sigma=self.us2cycles(cfg['qubit']['sigma']),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 4)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length']/4),
+                       length=self.us2cycles(cfg['qubit']['pulse_length']))
 
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
                                  style="arb",

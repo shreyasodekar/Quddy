@@ -5,13 +5,14 @@ with open(pwd + '\\config.json','r+') as f:
 config['Timestamp'] = datetime.now().strftime('%m/%d/%Y %I:%M:%S %p')
 
 path = os.path.abspath('./Data') + '/' +str(config['Device Name']) +  '/CW/'
-expname = 'C2_Two_tone'
+expname = 'C3_Three_tone'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
-expt_cfg = {'resonator_frequency' : 7.565866029e+09,
-            'start': 3.275e9,
-            'stop': 3.325e9,
+expt_cfg = {'resonator_frequency' : 7.551656765e+09,  ## This should be the resonator frequency at |e>
+            'f01': 3.3065655e9,
+            'start': 3.15e9,
+            'stop': 3.22e9,
             'points': 200
             }
 
@@ -30,7 +31,7 @@ pna.averages(config['pna']['averages'])
 pna.group_trigger_count(config['pna']['averages'])
 
 mxg.power(config['mxg']['power'])
-# sc.power(config['mxg']['power'])
+sc.power(config['sc']['power'])
 
 
 data = generate_empty_nan_array(len(x_pts),0)
@@ -45,12 +46,13 @@ f.create_dataset('S21', data = data)
 f.swmr_mode = True
 
 pna.output(1)
-# mxg.rf_output(1)
+mxg.rf_output(1)
 sc.output_status(1)
 
+sc.frequency(expt_cfg['f01'])
+
 for x in tqdm(range(len(x_pts))):
-    # mxg.frequency(x_pts[x])
-    sc.frequency(x_pts[x]) 
+    mxg.frequency(x_pts[x]) 
     temp = pna.polar()
     data[x] = np.mean(temp)
     f['S21'][:] = data
@@ -59,7 +61,7 @@ for x in tqdm(range(len(x_pts))):
     # f['Fridge snapshot'] = snapshot
 
 pna.output(0)
-# mxg.rf_output(0)
+mxg.rf_output(0)
 sc.output_status(0)
 pna.sweep_mode("CONT")
 
@@ -67,14 +69,14 @@ if show_plot:
     # Plot 
     popt, pcov = curve_fit(fitter.lorentzian, x_pts, 20*np.log10(np.abs(data)), p0=[x_pts[np.argmax(20*np.log10(np.abs(data)))], -30, 10, 1e6])
     fig = plt.figure(figsize=(16,6))
-    plt.subplot(121, title="Two Tone", xlabel="Frequency (GHz)", ylabel="Magnitude (dB)")
+    plt.subplot(121, title="Three Tone", xlabel="Frequency (GHz)", ylabel="Magnitude (dB)")
     plt.plot(x_pts, 20*np.log10(np.abs(data)))
     plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
     plt.grid()
     fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '[]{}"'}) , fontsize=10)
     plt.savefig(path+'/'+filename.split('.')[0]+'.png')
     plt.show()
-    print('Qubit frequency is ' + str(popt[0]/1e9) + ' GHz')
+    print('f_ef is ' + str(popt[0]/1e9) + ' GHz')
     print('FWHM is ' + str(np.abs(popt[3])/1e6) + ' MHz')
     
     if ask_save_to_doc:

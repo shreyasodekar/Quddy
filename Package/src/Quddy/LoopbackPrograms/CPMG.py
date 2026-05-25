@@ -28,19 +28,19 @@ class CPMGProgram(RAveragerProgram):
         self.q_rp   = self.ch_page(cfg['qubit']['channel'])
         self.r_wait = 7
         self.safe_regwi(self.q_rp, self.r_wait,
-                        self.us2cycles(cfg['start']))
+                        self.us2cycles(cfg['start']/2))
 
-        # Rx (π/2)
+        # Rx (π/2) - half-pulse_length
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="Rx",
-                       sigma=self.us2cycles(cfg['qubit']['sigma']),
-                       length=self.us2cycles(cfg['qubit']['sigma']))
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length'] / (2*4)),
+                       length=self.us2cycles(cfg['qubit']['pulse_length'] / 2))
 
-        # Ry (π)
+        # Ry (π) - full-pulse_length
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="Ry",
-                       sigma=self.us2cycles(cfg['qubit']['sigma']),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 3)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length']/4),
+                       length=self.us2cycles(cfg['qubit']['pulse_length']))
 
         self.default_pulse_registers(ch=cfg['qubit']['channel'],
                                      style="arb",
@@ -60,6 +60,10 @@ class CPMGProgram(RAveragerProgram):
         self.sync_all(self.us2cycles(500))
 
     def body(self):
+        ## CPMG loop requirements
+        cpmg_count = 16
+        c_i = 17
+
         cfg = self.cfg
         # π/2 (X)
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
@@ -67,18 +71,25 @@ class CPMGProgram(RAveragerProgram):
                                  phase=self.deg2reg(cfg['qubit']['phase']))
         self.pulse(ch=cfg['qubit']['channel'])
 
-        # [τ — π(Y) — τ] × N
-        for _ in range(cfg['qubit']['num_pi_pulses_in_CPMG']):
-            self.sync_all()
-            self.sync(self.q_rp, self.r_wait)            # τ
+        # π (Y)
+        self.set_pulse_registers(ch=cfg['qubit']['channel'],
+                                    waveform='Ry',
+                                    phase=self.deg2reg(cfg['qubit']['phase'] + 90))
+        
+        self.regwi(0, cpmg_count, 0)
+        self.regwi(0, c_i, self.cfg['CPMG order']-1)
 
-            self.set_pulse_registers(ch=cfg['qubit']['channel'],
-                                     waveform='Ry',
-                                     phase=self.deg2reg(cfg['qubit']['phase'] + 90))
-            self.pulse(ch=cfg['qubit']['channel'])
+        self.label('LOOP_CPMG')
 
-            self.sync_all()
-            self.sync(self.q_rp, self.r_wait)            # τ
+        #### This need to be in a loop. [wait(tau/2n) --- pulse(pi) --- wait (tau/2)]
+        self.sync_all(self.q_rp, self.r_wait)            # τ/2 -> because r_wait is initialized as start/2
+        self.pulse(ch=cfg['qubit']['channel'])           #        and updated by step/2 over interations.
+        self.sync_all(self.q_rp, self.r_wait)            # τ/2 
+        #####
+
+        self.mathi(0, cpmg_count, cpmg_count, "+", 1)
+        self.memwi(0, cpmg_count, self.COUNTER_ADDR)
+        self.loopnz(0, c_i, 'LOOP_CPMG')
 
         # π/2 (X)
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
@@ -96,4 +107,4 @@ class CPMGProgram(RAveragerProgram):
 
     def update(self):
         self.mathi(self.q_rp, self.r_wait, self.r_wait, '+',
-                   self.us2cycles(self.cfg['step']))
+                   self.us2cycles(self.cfg['step']/2))

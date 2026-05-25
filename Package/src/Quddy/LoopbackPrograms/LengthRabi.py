@@ -28,7 +28,7 @@ class LengthRabiProgram(RAveragerProgram):
 
         # --- sweep register setup (length) ---
         self.q_rp    = self.ch_page(cfg['qubit']['channel'])
-        self.r_length = self.sreg(cfg['qubit']['channel'], 'length')
+        self.r_length = self.sreg(cfg['qubit']['channel'], 'l')
 
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
                                  style="const",

@@ -9,8 +9,7 @@ expname = 'C2_2_Two_tone_gatedep'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
-expt_cfg = {'resonator_frequency': 8.15223589097666e9,
-            'f_start': 3.2e9,
+expt_cfg = {'f_start': 3.2e9,
             'f_stop': 4.8e9,
             'f_points': 10,
             'v_start': 1900,
@@ -18,7 +17,7 @@ expt_cfg = {'resonator_frequency': 8.15223589097666e9,
             'v_points' : 5
             }
 
-x_pts = np.linspace(expt_cfg['f_start'],expt_cfg['f_stop'],expt_cfg['f_points'])
+x_pts = set_sweep(config, expt_cfg['f_start'], expt_cfg['f_stop'], expt_cfg['f_points'])
 y_pts = np.linspace(expt_cfg['v_start'],expt_cfg['v_stop'],expt_cfg['v_points'])
 
 switch.channels[0].switch(1)
@@ -28,7 +27,7 @@ pna.power(config['pna']['power'])
 mxg.power(config['mxg']['power'])
 
 data = generate_empty_nan_array(len(y_pts), len(x_pts))
-snapshot = generate_empty_snapshot_array(len(y_pts), len(x_pts))
+# snapshot = generate_empty_snapshot_array(len(y_pts), len(x_pts))
 
 # # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -36,7 +35,7 @@ f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('Gate Voltage', data = y_pts)
 f.create_dataset('S21', data = data)
-f.create_dataset('Fridge snapshot', data = snapshot)
+# f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 for y in tqdm(range(len(y_pts))):
@@ -53,8 +52,6 @@ for y in tqdm(range(len(y_pts))):
     pna.if_bandwidth(config['pna']['if_bandwidth'])
     pna.averages_enabled(True)
     pna.averages(100)
-    meas = Measurement()
-    meas.register_parameter(pna.polar)
     pna.output(1)
     ST_data = pna.polar()
     pna.output(0)
@@ -66,8 +63,6 @@ for y in tqdm(range(len(y_pts))):
     pna.stop(ST_x_pts[np.argmin(20*np.log10(np.abs(ST_data)))])
     pna.points(100)
     pna.averages(config['pna']['averages'])
-    meas = Measurement()
-    meas.register_parameter(pna.polar)
     for x in range(len(x_pts)):
         mxg.rf_output(1)
         mxg.frequency(x_pts[x])
@@ -78,8 +73,8 @@ for y in tqdm(range(len(y_pts))):
         data[y,x] = np.mean(temp) 
         f['S21'][:] = data
         time.sleep(0.5)
-        snapshot[y,x] = get_fridge_snapshot(Proteox)
-        f['Fridge snapshot'] = snapshot
+        # snapshot[y,x] = get_fridge_snapshot(Proteox)
+        # f['Fridge snapshot'] = snapshot
 
 pna.sweep_mode("CONT")
 
@@ -92,13 +87,14 @@ fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('','
 plt.savefig(path+'/'+filename.split('.')[0]+'.png')
 plt.show()
 
-# Save to docx
-savedoc = input('Save to Doc file? [y]/n : ')
-if savedoc == 'y' or savedoc == '':
-    picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
-    picture.Width = 500 #648 
-    picture.Height = 187.5 #243 
-    word.Selection.TypeText("\n")
-doc.Save()
+if ask_save_to_doc:
+    # Save to docx
+    savedoc = input('Save to Doc file? [y]/n : ')
+    if savedoc == 'y' or savedoc == '':
+        word.Selection.TypeText("\n")
+        picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
+        picture.Width = 500 #648
+        picture.Height = 187.5 #243
+    doc.Save()
 
 f.close()

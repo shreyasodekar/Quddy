@@ -27,11 +27,11 @@ class RamseyProgram(RAveragerProgram):
         self.safe_regwi(self.q_rp, self.r_wait,
                         self.us2cycles(cfg['start']))
 
-        # π/2 pulse (sigma/2 for half-pi)
+        # π/2 pulse (pelse_length/2 for half-pi)
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="qubit",
-                       sigma=self.us2cycles(cfg['qubit']['sigma'] / 2),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 4 / 2)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length'] / (2*4)),
+                       length=self.us2cycles(cfg['qubit']['pulse_length'])/ 2)
 
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
                                  style="arb",

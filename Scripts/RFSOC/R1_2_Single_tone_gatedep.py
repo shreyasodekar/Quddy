@@ -18,13 +18,13 @@ expt_cfg = {'start': 5715,
 
 gate_cfg = {'start': -4500,
             'stop': 4500,
-            'step': 100
+            'points': 100
             }
 
 x_pts = helper.set_sweep(config, expt_cfg['start'], expt_cfg['stop'], expt_cfg['points'])
-y_pts = np.linspace(gate_cfg['start'],gate_cfg['stop'],gate_cfg['step'])
+y_pts = np.linspace(gate_cfg['start'],gate_cfg['stop'],gate_cfg['points'])
 data = generate_empty_nan_array(len(y_pts),len(x_pts))
-snapshot = generate_empty_snapshot_array(len(y_pts),len(x_pts))
+# snapshot = generate_empty_snapshot_array(len(y_pts),len(x_pts))
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
@@ -32,7 +32,7 @@ f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('Gate Voltage', data = y_pts)
 f.create_dataset('S21', data = data)
-f.create_dataset('Fridge snapshot', data = snapshot)
+# f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 switch.channels[0].switch(2)
@@ -41,12 +41,12 @@ switch.channels[1].switch(2)
 if Use_Raverager:
     for y in tqdm(range(len(y_pts))):
         ivvi._set_dac(12, y_pts[y]/5)
-        prog = LoopbackPrograms.ResonatorSpectroscopy.ResonatorSpectroscopyProgram(soccfg, config)
+        prog = ResonatorSpectroscopyProgram(soccfg, config)
         _, avgi, avgq = prog.acquire(soc, progress=False)
         data[y] = avgi[0][0]+1j*avgq[0][0]
         f['S21'][:] = data
-        snapshot[y,:] = get_fridge_snapshot(Proteox)
-        f['Fridge snapshot'] = snapshot
+        # snapshot[y,:] = get_fridge_snapshot(Proteox)
+        # f['Fridge snapshot'] = snapshot
 else:
     for y in tqdm(range(len(y_pts))):
         ivvi._set_dac(12, y_pts[y]/5)
@@ -56,25 +56,26 @@ else:
             avgi, avgq = prog.acquire(soc, progress=False)
             data[y,x] = avgi[0][0]+1j*avgq[0][0]
             f['S21'][:] = data
-            snapshot[y,x] = get_fridge_snapshot(Proteox)
-            f['Fridge snapshot'] = snapshot
+            # snapshot[y,x] = get_fridge_snapshot(Proteox)
+            # f['Fridge snapshot'] = snapshot
 
-# Plot results. Need to add fitting functions.
-fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Resonator Spectroscopy - Gate Dependence", xlabel="Frequency (MHz)", ylabel="Gate Voltage (mV)")
-plt.pcolormesh(x_pts, y_pts, np.abs(data))
-plt.colorbar()
-fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.split('.')[0]+'.png')
+if show_plot:
+    # Plot results. Need to add fitting functions.
+    fig = plt.figure(figsize=(16,6))
+    plt.subplot(121,title="Resonator Spectroscopy - Gate Dependence", xlabel="Frequency (MHz)", ylabel="Gate Voltage (mV)")
+    plt.pcolormesh(x_pts, y_pts, np.abs(data))
+    plt.colorbar()
+    fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+    plt.savefig(path+'/'+filename.split('.')[0]+'.png')
+    
+    if ask_save_to_doc:
+        # Save to docx
+        savedoc = input('Save to Doc file? [y]/n : ')
+        if savedoc == 'y' or savedoc == '':
+            word.Selection.TypeText("\n")
+            picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
+            picture.Width = 500 #648
+            picture.Height = 187.5 #243
+        doc.Save()
 
-# Save to docx
-import win32com.client as win32
-word = win32.Dispatch("Word.Application")
-doc = word.ActiveDocument
-selection = word.Selection
-savedoc = input('Save to Doc file? [y]/n : ')
-if savedoc == 'y' or savedoc == '':
-    picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
-    picture.Width = 648
-    picture.Height = 243
-doc.Save()
+f.close()

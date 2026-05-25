@@ -139,3 +139,6 @@ def set_sweep(cfg, start, stop, points):
     cfg['step']  = (stop - start) / (points - 1)
     cfg['expts'] = points
     return np.linspace(start, stop, points)
+
+def polar2db(data):
+    return 20*np.log10(np.abs(data))

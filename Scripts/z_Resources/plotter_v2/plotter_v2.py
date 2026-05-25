@@ -27,10 +27,11 @@ from PyQt5.QtWidgets import (
     QButtonGroup, QSpinBox, QDoubleSpinBox, QLineEdit, QMessageBox,
     QFrame, QScrollArea, QSplitter, QSlider, QToolButton, QSizePolicy,
     QColorDialog, QListWidget, QListWidgetItem, QShortcut,
-    QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView
+    QTreeWidget, QTreeWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView,
+    QTreeView, QFileSystemModel, QMenu, QToolTip, QAbstractItemView
 )
 from PyQt5.QtGui import QPixmap, QIcon, QFont, QKeySequence
-from PyQt5.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import Qt, QTimer, QSize, QPropertyAnimation, QEasingCurve, QDir
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -226,6 +227,7 @@ class OverlayData:
     source_path: str            # Original file path
     x_label: str                # Axis label from original file
     is_2d: bool = False         # Whether overlay is 2D data
+    legend_label: str = ''      # User-entered legend text (supports LaTeX $...$)
 
 
 # Colors for auto-assigning to overlays
@@ -247,6 +249,8 @@ EXPERIMENT_REGISTRY: Dict[str, ExperimentSpec] = {
     'C1_Single_tone': ExperimentSpec(
         ExperimentType.CW_1D, 'Frequency', 'Frequency (Hz)'),
     'C2_Two_tone': ExperimentSpec(
+        ExperimentType.CW_1D, 'Frequency', 'Frequency (Hz)'),
+    'C3_Three_tone': ExperimentSpec(
         ExperimentType.CW_1D, 'Frequency', 'Frequency (Hz)'),
     # CW 2D experiments
     'C1_1_Single_tone_powerdep': ExperimentSpec(
@@ -277,6 +281,8 @@ EXPERIMENT_REGISTRY: Dict[str, ExperimentSpec] = {
     'R5_T2Ramsey': ExperimentSpec(
         ExperimentType.RFSOC_1D, 'Time', 'Time (μs)'),
     'R5_T2Echo': ExperimentSpec(
+        ExperimentType.RFSOC_1D, 'Time', 'Time (μs)'),
+    'R5_CPMG': ExperimentSpec(
         ExperimentType.RFSOC_1D, 'Time', 'Time (μs)'),
     # RFSOC 2D experiments
     'R1_1_Single_tone_powerdep': ExperimentSpec(
@@ -642,7 +648,7 @@ class Sidebar(QWidget):
         self.callbacks = {}
         self._is_2d_mode = False  # Track if in 2D mode for fitting
 
-        self.setFixedWidth(280)
+        self.setMinimumWidth(200)
         self.setStyleSheet("""
             QLabel {
                 font-size: 11px;
@@ -811,7 +817,16 @@ class Sidebar(QWidget):
         overlay_container_layout = QVBoxLayout(self.overlay_container)
         overlay_container_layout.setContentsMargins(6, 6, 6, 6)
         overlay_container_layout.setSpacing(2)
-        
+
+        # Main plot legend label (always shown at the top of the list)
+        self.main_legend_edit = QLineEdit()
+        self.main_legend_edit.setPlaceholderText("Main plot")
+        self.main_legend_edit.setFixedHeight(22)
+        self.main_legend_edit.setStyleSheet("font-size: 10px; padding: 1px 4px;")
+        self.main_legend_edit.textChanged.connect(
+            lambda text: self._emit('main_legend_changed', text))
+        overlay_container_layout.addWidget(self.main_legend_edit)
+
         # List widget for overlays
         self.overlay_list_widget = QWidget()
         self.overlay_list_widget.setAttribute(Qt.WA_TranslucentBackground)
@@ -1847,41 +1862,63 @@ class Sidebar(QWidget):
         self.fit_color_button.hide()
         self.fit_style_container.hide()
     
-    def add_overlay_row(self, index: int, label: str, color: str):
+    def add_overlay_row(self, index: int, label: str, color: str,
+                        legend_label: str = ''):
         """Add a row to the overlay list for managing an overlay."""
         row_widget = QWidget()
         row_widget.setProperty('overlay_index', index)
         row_widget.setAttribute(Qt.WA_TranslucentBackground)
-        row_layout = QHBoxLayout(row_widget)
+        row_outer = QVBoxLayout(row_widget)
+        row_outer.setContentsMargins(0, 0, 0, 0)
+        row_outer.setSpacing(2)
+
+        # ── Top line: visibility checkbox + color + remove ──
+        top_row = QWidget()
+        row_layout = QHBoxLayout(top_row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
-        
-        # Visibility checkbox with label (truncated filename - prioritize ending)
+
         display_label = label if len(label) <= 20 else "..." + label[-17:]
         visible_cb = QCheckBox(display_label)
         visible_cb.setChecked(True)
-        visible_cb.setToolTip(label)  # Full filename in tooltip
-        visible_cb.toggled.connect(lambda checked, idx=index: self._emit('overlay_visibility_changed', idx, checked))
+        visible_cb.setToolTip(label)
+        visible_cb.toggled.connect(
+            lambda checked, idx=index:
+            self._emit('overlay_visibility_changed', idx, checked))
         row_layout.addWidget(visible_cb, 1)
-        
-        # Color button
+
         color_btn = QPushButton()
         color_btn.setFixedSize(20, 20)
-        color_btn.setStyleSheet(f"background-color: {color}; border: 1px solid #888;")
+        color_btn.setStyleSheet(
+            f"background-color: {color}; border: 1px solid #888;")
         color_btn.setToolTip("Change overlay color")
-        color_btn.clicked.connect(lambda _, idx=index, btn=color_btn: self._pick_overlay_color(idx, btn))
+        color_btn.clicked.connect(
+            lambda _, idx=index, btn=color_btn:
+            self._pick_overlay_color(idx, btn))
         row_layout.addWidget(color_btn)
-        
-        # Remove button
+
         remove_btn = QPushButton("×")
         remove_btn.setFixedSize(20, 20)
         remove_btn.setToolTip("Remove this overlay")
-        remove_btn.clicked.connect(lambda _, idx=index: self._emit('remove_overlay', idx))
+        remove_btn.clicked.connect(
+            lambda _, idx=index: self._emit('remove_overlay', idx))
         row_layout.addWidget(remove_btn)
-        
+
+        row_outer.addWidget(top_row)
+
+        # ── Bottom line: legend label input ──
+        legend_edit = QLineEdit()
+        legend_edit.setPlaceholderText("Legend label… (LaTeX: $x^2$)")
+        legend_edit.setText(legend_label)
+        legend_edit.setFixedHeight(22)
+        legend_edit.setStyleSheet(
+            "font-size: 10px; padding: 1px 4px;")
+        legend_edit.textChanged.connect(
+            lambda text, idx=index:
+            self._emit('overlay_legend_changed', idx, text))
+        row_outer.addWidget(legend_edit)
+
         self.overlay_list_layout.addWidget(row_widget)
-        
-        # Show overlay container if hidden
         self.overlay_container.show()
     
     def _pick_overlay_color(self, index: int, btn: QPushButton):
@@ -1923,7 +1960,8 @@ class Sidebar(QWidget):
         # Sort by filename
         sorted_overlays = sorted(enumerate(overlays), key=lambda x: x[1].label.lower())
         for new_idx, (orig_idx, overlay) in enumerate(sorted_overlays):
-            self.add_overlay_row(orig_idx, overlay.label, overlay.color)
+            self.add_overlay_row(orig_idx, overlay.label, overlay.color,
+                                 legend_label=overlay.legend_label)
         if overlays:
             self.overlay_container.show()
     
@@ -3965,7 +4003,8 @@ class PlotWidget1D(QWidget):
         
         # Overlay state
         self._overlays: List[OverlayData] = []
-        
+        self._main_legend_label: str = ''  # User-set legend label for the main trace
+
         # Connect mouse events for zoom
         self.canvas.mpl_connect('button_press_event', self._on_mouse_press)
         self.canvas.mpl_connect('button_release_event', self._on_mouse_release)
@@ -4877,7 +4916,9 @@ class PlotWidget1D(QWidget):
                 marker_kwargs['markeredgecolor'] = self.settings.marker_color
 
             self.ax.plot(plot_x, plot_y, color=self.settings.line_color,
-                         linewidth=self.settings.line_width, **marker_kwargs)
+                         linewidth=self.settings.line_width,
+                         label=self._main_legend_label or '_nolegend_',
+                         **marker_kwargs)
             
             # Draw overlays (not in Argand mode)
             if not self._argand_mode:
@@ -4909,12 +4950,19 @@ class PlotWidget1D(QWidget):
                         # Handle interchange
                         if self._interchanged:
                             self.ax.plot(overlay_y, overlay_x, color=overlay.color,
-                                         linewidth=self.settings.line_width, alpha=0.8)
+                                         linewidth=self.settings.line_width, alpha=0.8,
+                                         label=overlay.legend_label or '_nolegend_')
                         else:
                             self.ax.plot(overlay_x, overlay_y, color=overlay.color,
-                                         linewidth=self.settings.line_width, alpha=0.8)
+                                         linewidth=self.settings.line_width, alpha=0.8,
+                                         label=overlay.legend_label or '_nolegend_')
                     except Exception as e:
                         print(f"Overlay plot error: {e}")
+
+                # Show legend if main label or any overlay label is set
+                if self._main_legend_label or \
+                        any(o.legend_label for o in self._overlays if o.visible):
+                    self.ax.legend(fontsize=max(self.settings.label_size - 2, 8))
             
             # Apply custom or default labels
             x_label = self.settings.x_label_text if self.settings.x_label_text else x_label_default
@@ -6807,11 +6855,17 @@ class PlotWidget2D(QWidget):
                                 
                                 # Get slice at same index (if within bounds)
                                 if overlay_zs.shape[0] > y_idx:
-                                    self.ax_xcut.plot(overlay.xs, overlay_zs[y_idx], 
+                                    self.ax_xcut.plot(overlay.xs, overlay_zs[y_idx],
                                                       color=overlay.color,
-                                                      linewidth=self.settings.line_width, alpha=0.8)
+                                                      linewidth=self.settings.line_width, alpha=0.8,
+                                                      label=overlay.legend_label or '_nolegend_')
                             except Exception as e:
                                 print(f"Overlay linecut error: {e}")
+
+                    # Show legend on horizontal linecut if any labels set
+                    if any(o.legend_label for o in self._overlays if o.visible):
+                        self.ax_xcut.legend(
+                            fontsize=max(self.settings.label_size - 2, 8))
                         
                 if self.settings.grid_enabled:
                     self.ax_xcut.grid(True, alpha=self.settings.grid_alpha, linewidth=self.settings.grid_width)
@@ -6865,11 +6919,17 @@ class PlotWidget2D(QWidget):
                             
                             # Get slice at same index (if within bounds)
                             if overlay_zs.shape[1] > x_idx and overlay.ys is not None:
-                                self.ax_ycut.plot(overlay.ys, overlay_zs[:, x_idx], 
+                                self.ax_ycut.plot(overlay.ys, overlay_zs[:, x_idx],
                                                   color=overlay.color,
-                                                  linewidth=self.settings.line_width, alpha=0.8)
+                                                  linewidth=self.settings.line_width, alpha=0.8,
+                                                  label=overlay.legend_label or '_nolegend_')
                         except Exception as e:
                             print(f"Overlay vertical linecut error: {e}")
+
+                    # Show legend on vertical linecut if any labels set
+                    if any(o.legend_label for o in self._overlays if o.visible):
+                        self.ax_ycut.legend(
+                            fontsize=max(self.settings.label_size - 2, 8))
                             
                 self.ax_ycut.set_xlabel(y_label, fontsize=self.settings.label_size)
                 self.ax_ycut.set_ylabel(ylabel, fontsize=self.settings.label_size)
@@ -6956,6 +7016,328 @@ class PlotWidget2D(QWidget):
             print(f"Plot update error: {e}")
 
 
+class FileExplorerSidebar(QWidget):
+    """Left file explorer sidebar — browse HDF5 and .dat experiment files."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(150)
+        self.setMaximumWidth(600)
+
+        # Callbacks wired by Plotter
+        self._load_callback = None
+        self._overlay_callback = None
+        self._hdf5_browser_callback = None
+
+        # Column proportions: fraction of viewport width given to Name column
+        self._col0_ratio = 180 / (180 + 110)  # ~0.62
+        self._resizing = False  # guard against sectionResized ↔ resizeEvent loop
+
+        # QFileSystemModel — shows only .h5 / .hdf5 / .dat + directories
+        self._fs_model = QFileSystemModel()
+        self._fs_model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot)
+        self._fs_model.setNameFilters(['*.h5', '*.hdf5', '*.dat'])
+        self._fs_model.setNameFilterDisables(False)  # Hide non-matching files
+
+        self._setup_ui()
+        self._set_root(os.path.expanduser('~'))
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.setStyleSheet("""
+            QLabel { font-size: 11px; }
+            QPushButton {
+                border: 1px solid #ccc; border-radius: 4px;
+                padding: 4px 8px; font-size: 11px;
+            }
+            QPushButton:hover { background-color: #e0e0e0; }
+            QLineEdit {
+                border: 1px solid #ccc; border-radius: 4px;
+                padding: 4px; font-size: 11px;
+            }
+            QToolButton {
+                border: 1px solid #ccc; border-radius: 4px;
+                padding: 2px 6px; font-size: 11px;
+            }
+            QToolButton:hover { background-color: #e0e0e0; }
+        """)
+
+        # ── Header ──
+        header = QWidget()
+        header.setStyleSheet(
+            "background-color: #e8e8e8; border-bottom: 1px solid #ccc;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(8, 6, 8, 6)
+        lbl = QLabel("Files")
+        lbl.setStyleSheet("font-weight: bold; font-size: 11px;")
+        header_layout.addWidget(lbl)
+        header_layout.addStretch()
+        layout.addWidget(header)
+
+        # ── Path bar ──
+        path_widget = QWidget()
+        path_layout = QHBoxLayout(path_widget)
+        path_layout.setContentsMargins(4, 4, 4, 2)
+        path_layout.setSpacing(2)
+
+        self.path_edit = QLineEdit()
+        self.path_edit.setPlaceholderText("Directory path…")
+        self.path_edit.returnPressed.connect(self._on_path_entered)
+
+        self.up_btn = QToolButton()
+        self.up_btn.setText("↑")
+        self.up_btn.setToolTip("Go up one directory")
+        self.up_btn.clicked.connect(self._on_go_up)
+
+        self.browse_btn = QPushButton("…")
+        self.browse_btn.setFixedWidth(28)
+        self.browse_btn.setToolTip("Browse for directory")
+        self.browse_btn.clicked.connect(self._on_browse)
+
+        path_layout.addWidget(self.path_edit, 1)
+        path_layout.addWidget(self.up_btn)
+        path_layout.addWidget(self.browse_btn)
+        layout.addWidget(path_widget)
+
+        # ── Filter box ──
+        filter_widget = QWidget()
+        filter_layout = QHBoxLayout(filter_widget)
+        filter_layout.setContentsMargins(4, 0, 4, 4)
+        filter_layout.setSpacing(4)
+        filter_layout.addWidget(QLabel("🔍"))
+        self.filter_edit = QLineEdit()
+        self.filter_edit.setPlaceholderText("Filter by name…")
+        self.filter_edit.textChanged.connect(self._on_filter_changed)
+        filter_layout.addWidget(self.filter_edit)
+        layout.addWidget(filter_widget)
+
+        # ── Tree view ──
+        self.tree = QTreeView()
+        self.tree.setModel(self._fs_model)
+        # Show only Name (0) and Date Modified (3); hide Size (1) and Type (2)
+        self.tree.hideColumn(1)
+        self.tree.hideColumn(2)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Interactive)
+        self.tree.header().setSectionResizeMode(3, QHeaderView.Interactive)
+        self.tree.header().resizeSection(0, 180)   # default name width
+        self.tree.header().resizeSection(3, 110)   # default date width
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().sectionResized.connect(self._on_section_resized)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setIconSize(QSize(16, 16))
+        self.tree.setSortingEnabled(True)
+        self.tree.sortByColumn(0, Qt.AscendingOrder)
+        self.tree.setTextElideMode(Qt.ElideMiddle)
+        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        # Hover tooltips
+        self.tree.setMouseTracking(True)
+        self.tree.viewport().setMouseTracking(True)
+        self.tree.viewport().installEventFilter(self)
+
+        self.tree.clicked.connect(self._on_item_clicked)
+        self.tree.activated.connect(self._on_item_activated)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_context_menu)
+
+        layout.addWidget(self.tree, 1)
+
+    # ── Directory navigation ──────────────────────────────────────────────
+
+    def _set_root(self, path: str):
+        if not os.path.isdir(path):
+            return
+        self.path_edit.setText(path)
+        self._fs_model.setRootPath(path)
+        self.tree.setRootIndex(self._fs_model.index(path))
+
+    def _on_path_entered(self):
+        self._set_root(self.path_edit.text().strip())
+
+    def _on_browse(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Directory", self.path_edit.text())
+        if path:
+            self._set_root(path)
+
+    def _on_go_up(self):
+        current = self.path_edit.text().rstrip('/\\')
+        parent = os.path.dirname(current)
+        if parent and parent != current:
+            self._set_root(parent)
+
+    def _on_filter_changed(self, text: str):
+        text = text.strip()
+        if text:
+            self._fs_model.setNameFilters(
+                [f'*{text}*.h5', f'*{text}*.hdf5', f'*{text}*.dat'])
+        else:
+            self._fs_model.setNameFilters(['*.h5', '*.hdf5', '*.dat'])
+
+    def get_root_path(self) -> str:
+        return self.path_edit.text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_columns()
+
+    def _resize_columns(self):
+        """Redistribute column widths proportionally to the current sidebar width."""
+        if self._resizing:
+            return
+        self._resizing = True
+        available = self.tree.viewport().width()
+        if available > 0:
+            col0 = max(int(available * self._col0_ratio), 40)
+            col3 = max(available - col0, 40)
+            self.tree.header().resizeSection(0, col0)
+            self.tree.header().resizeSection(3, col3)
+        self._resizing = False
+
+    def _on_section_resized(self, logical_index, old_size, new_size):
+        """Update stored ratio when the user manually drags a column divider."""
+        if self._resizing:
+            return
+        total = (self.tree.header().sectionSize(0)
+                 + self.tree.header().sectionSize(3))
+        if total > 0:
+            self._col0_ratio = self.tree.header().sectionSize(0) / total
+
+    # ── Item interactions ────────────────────────────────────────────────
+
+    def _path_from_index(self, index) -> str:
+        return self._fs_model.filePath(index)
+
+    def _on_item_clicked(self, index):
+        path = self._path_from_index(index)
+        if not os.path.isfile(path):
+            return
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.ShiftModifier:
+            if self._overlay_callback:
+                self._overlay_callback(path)
+        else:
+            if self._load_callback:
+                self._load_callback(path)
+
+    def _on_item_activated(self, index):
+        """Enter key: navigate into directory or load file."""
+        path = self._path_from_index(index)
+        if os.path.isdir(path):
+            self._set_root(path)
+        elif os.path.isfile(path) and self._load_callback:
+            self._load_callback(path)
+
+    def _on_context_menu(self, pos):
+        index = self.tree.indexAt(pos)
+        if not index.isValid():
+            return
+        path = self._path_from_index(index)
+        global_pos = self.tree.viewport().mapToGlobal(pos)
+
+        menu = QMenu(self)
+
+        if os.path.isdir(path):
+            open_dir = menu.addAction("Open Directory")
+            action = menu.exec_(global_pos)
+            if action == open_dir:
+                self._set_root(path)
+            return
+
+        load_action    = menu.addAction("Load")
+        overlay_action = menu.addAction("Add as Overlay")
+        menu.addSeparator()
+        ext = os.path.splitext(path)[1].lower()
+        browser_action = None
+        if ext in ('.h5', '.hdf5'):
+            browser_action = menu.addAction("Open in HDF5 Browser")
+        menu.addSeparator()
+        copy_action   = menu.addAction("Copy Path")
+        reveal_action = menu.addAction("Reveal in Explorer")
+
+        action = menu.exec_(global_pos)
+
+        if action == load_action and self._load_callback:
+            self._load_callback(path)
+        elif action == overlay_action and self._overlay_callback:
+            self._overlay_callback(path)
+        elif browser_action and action == browser_action \
+                and self._hdf5_browser_callback:
+            self._hdf5_browser_callback(path)
+        elif action == copy_action:
+            QApplication.clipboard().setText(path)
+        elif action == reveal_action:
+            self._reveal_in_explorer(path)
+
+    @staticmethod
+    def _reveal_in_explorer(path: str):
+        import subprocess
+        try:
+            if sys.platform == 'win32':
+                subprocess.Popen(
+                    ['explorer', '/select,', os.path.normpath(path)])
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', '-R', path])
+            else:
+                subprocess.Popen(['xdg-open', os.path.dirname(path)])
+        except Exception:
+            pass
+
+    # ── Hover tooltip ────────────────────────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        from PyQt5.QtCore import QEvent
+        if obj is self.tree.viewport() \
+                and event.type() == QEvent.ToolTip:
+            index = self.tree.indexAt(event.pos())
+            if index.isValid():
+                path = self._path_from_index(index)
+                if os.path.isfile(path):
+                    QToolTip.showText(
+                        event.globalPos(),
+                        self._build_tooltip(path),
+                        self.tree.viewport())
+                    return True
+                else:
+                    QToolTip.hideText()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def _build_tooltip(self, path: str) -> str:
+        fname = os.path.basename(path)
+        try:
+            size_kb = os.path.getsize(path) / 1024
+            size_str = (f"{size_kb:.1f} KB"
+                        if size_kb < 1024 else f"{size_kb/1024:.1f} MB")
+        except OSError:
+            size_str = ""
+
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in ('.h5', '.hdf5'):
+            return f"{fname}\n{size_str}"
+
+        try:
+            with h5py.File(path, 'r', libver='latest', swmr=True) as f:
+                lines = [fname, size_str, ""]
+                try:
+                    meta = json.loads(f['Metadata'][()].decode('utf-8'))
+                    for key in ('Sample Name', 'Device Name',
+                                'Expt ID', 'Timestamp'):
+                        if key in meta:
+                            lines.append(f"{key}: {meta[key]}")
+                except Exception:
+                    pass
+                if 'S21' in f:
+                    lines.append(f"S21 shape: {f['S21'].shape}")
+                return '\n'.join(lines)
+        except Exception:
+            return f"{fname}\n{size_str}"
+
+
 class Plotter(QMainWindow):
     """Main window with collapsible sidebar."""
 
@@ -6969,6 +7351,9 @@ class Plotter(QMainWindow):
         self.update_timer: Optional[QTimer] = None
         self.settings = PlotSettings()
         self.sidebar_visible = True
+        self.sidebar_width = 280
+        self.file_explorer_visible = False
+        self.file_explorer_width = 280
         self._current_fit_result = None  # Stores current fit result for copy
         self._current_resonator_result = None  # Stores current resonator fit result
         self._stitch_spec = None  # Stores spec for stitch validation
@@ -7056,47 +7441,63 @@ class Plotter(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # Main content area
+        # ── File explorer sidebar (left) ──────────────────────────────────
+        self.file_explorer = FileExplorerSidebar()
+        self.file_explorer._load_callback = self.load_file
+        self.file_explorer._overlay_callback = self._add_overlay_from_file
+        self.file_explorer._hdf5_browser_callback = \
+            self._show_hdf5_browser_for_path
+        self._load_explorer_config()
+
+        # ── Main content area ─────────────────────────────────────────────
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
         content_layout.setContentsMargins(8, 8, 8, 8)
 
-        # Top bar with file info and sidebar toggle
+        # Top bar
         top_bar = QHBoxLayout()
-        
+
+        # File explorer toggle (leftmost) — file icon
+        self.file_explorer_btn = QPushButton("⌸")
+        self.file_explorer_btn.setFixedSize(32, 32)
+        self.file_explorer_btn.setToolTip("Toggle File Explorer")
+        self.file_explorer_btn.clicked.connect(self._toggle_file_explorer)
+        top_bar.addWidget(self.file_explorer_btn)
+
         # Spacer on left to help center the label
         top_bar.addStretch()
-        
+
         # File info label (centered)
         self.file_info_label = QLabel("")
-        self.file_info_label.setStyleSheet("font-size: 12px; font-weight: bold; color: #333;")
+        self.file_info_label.setStyleSheet(
+            "font-size: 12px; font-weight: bold; color: #333;")
         self.file_info_label.setAlignment(Qt.AlignCenter)
         top_bar.addWidget(self.file_info_label)
-        
+
         top_bar.addStretch()
-        
+
         # Keyboard shortcuts cheatsheet button
         self.shortcuts_btn = QPushButton("⌨")
         self.shortcuts_btn.setFixedSize(32, 32)
         self.shortcuts_btn.setToolTip("Keyboard Shortcuts")
         self.shortcuts_btn.clicked.connect(self._show_shortcuts_cheatsheet)
         top_bar.addWidget(self.shortcuts_btn)
-        
+
         # HDF5 browser button (table icon, only visible for HDF5 files)
-        self.hdf5_browser_btn = QPushButton("☷")  # Trigram symbol as table icon
+        self.hdf5_browser_btn = QPushButton("☷")
         self.hdf5_browser_btn.setFixedSize(32, 32)
         self.hdf5_browser_btn.setToolTip("Browse HDF5 Structure")
         self.hdf5_browser_btn.clicked.connect(self._show_hdf5_browser)
-        self.hdf5_browser_btn.hide()  # Hidden by default
+        self.hdf5_browser_btn.hide()
         top_bar.addWidget(self.hdf5_browser_btn)
-        
-        # Toggle sidebar button (on the right)
+
+        # Toggle right sidebar button
         self.toggle_btn = QPushButton("☰")
         self.toggle_btn.setFixedSize(32, 32)
         self.toggle_btn.setToolTip("Toggle Sidebar")
         self.toggle_btn.clicked.connect(self._toggle_sidebar)
         top_bar.addWidget(self.toggle_btn)
-        
+
         content_layout.addLayout(top_bar)
 
         # Drop zone
@@ -7111,8 +7512,6 @@ class Plotter(QMainWindow):
         # Plot container
         self.plot_container = QVBoxLayout()
         content_layout.addLayout(self.plot_container)
-
-        main_layout.addWidget(content_widget, 1)
 
         # Sidebar
         self.sidebar = Sidebar()
@@ -7157,6 +7556,8 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('clear_overlays', self._on_clear_overlays)
         self.sidebar.set_callback('overlay_visibility_changed', self._on_overlay_visibility_changed)
         self.sidebar.set_callback('overlay_color_changed', self._on_overlay_color_changed)
+        self.sidebar.set_callback('overlay_legend_changed', self._on_overlay_legend_changed)
+        self.sidebar.set_callback('main_legend_changed', self._on_main_legend_changed)
         # Set up drop callback for overlay container
         self.sidebar.overlay_container.set_drop_callback(self._on_overlay_drop)
         self.sidebar.set_callback('import_style', self._on_import_style)
@@ -7176,7 +7577,25 @@ class Plotter(QMainWindow):
         self.sidebar.set_callback('show_residuals_toggled', self._on_show_residuals_toggled)
         self.sidebar.set_callback('copy_fit_results', self._on_copy_fit_results)
         self.sidebar.set_callback('fit_func_changed', self._on_fit_func_changed)
-        main_layout.addWidget(self.sidebar)
+
+        # ── Wrap everything in a horizontal QSplitter ─────────────────────
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setHandleWidth(4)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(self.file_explorer)    # index 0 — left
+        self.main_splitter.addWidget(content_widget)        # index 1 — centre
+        self.main_splitter.addWidget(self.sidebar)          # index 2 — right
+
+        # Centre panel gets all extra space; sidebars stay at their natural size
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
+
+        # Start with file explorer hidden
+        self.file_explorer.hide()
+        self.main_splitter.setSizes([0, 1120, 280])
+
+        main_layout.addWidget(self.main_splitter)
 
     def _on_escape_pressed(self):
         """Handle Escape key - cancel zoom/callout modes."""
@@ -7189,8 +7608,75 @@ class Plotter(QMainWindow):
                 self.plot_widget.set_delta_callout_mode(False)
 
     def _toggle_sidebar(self):
-        self.sidebar_visible = not self.sidebar_visible
-        self.sidebar.setVisible(self.sidebar_visible)
+        """Toggle right sidebar, preserving its width across hide/show."""
+        if self.sidebar.isVisible():
+            self.sidebar_width = self.main_splitter.sizes()[2]
+            self.sidebar.hide()
+            self.sidebar_visible = False
+        else:
+            self.sidebar.show()
+            self.sidebar_visible = True
+            sizes = self.main_splitter.sizes()
+            width = max(self.sidebar_width, 200)
+            sizes[2] = width
+            sizes[1] = max(200, sizes[1] - width)
+            self.main_splitter.setSizes(sizes)
+
+    def _toggle_file_explorer(self):
+        """Toggle left file explorer sidebar, preserving its width."""
+        if self.file_explorer.isVisible():
+            self.file_explorer_width = self.main_splitter.sizes()[0]
+            self.file_explorer.hide()
+            self.file_explorer_visible = False
+        else:
+            self.file_explorer.show()
+            self.file_explorer_visible = True
+            sizes = self.main_splitter.sizes()
+            width = max(self.file_explorer_width, 280)
+            sizes[0] = width
+            sizes[1] = max(200, sizes[1] - width)
+            self.main_splitter.setSizes(sizes)
+
+    def _show_hdf5_browser_for_path(self, file_path: str):
+        """Open HDF5 structure browser for any file path (from file explorer)."""
+        try:
+            dialog = HDF5BrowserDialog(file_path, parent=self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(
+                self, "HDF5 Browser Error",
+                f"Could not open HDF5 Browser:\n{e}")
+
+    # ── File explorer config persistence ─────────────────────────────────
+
+    _EXPLORER_CONFIG = os.path.join(
+        os.path.expanduser('~'), '.quddy_plotter_config.json')
+
+    def _load_explorer_config(self):
+        """Restore last browsed directory from config file."""
+        try:
+            with open(self._EXPLORER_CONFIG, 'r') as f:
+                cfg = json.load(f)
+            path = cfg.get('explorer_root', '')
+            if path and os.path.isdir(path):
+                self.file_explorer._set_root(path)
+        except Exception:
+            pass
+
+    def _save_explorer_config(self):
+        """Persist current browsed directory to config file."""
+        try:
+            cfg = {}
+            try:
+                with open(self._EXPLORER_CONFIG, 'r') as f:
+                    cfg = json.load(f)
+            except Exception:
+                pass
+            cfg['explorer_root'] = self.file_explorer.get_root_path()
+            with open(self._EXPLORER_CONFIG, 'w') as f:
+                json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
 
     def _show_hdf5_browser(self):
         """Show HDF5 structure browser dialog."""
@@ -7750,6 +8236,7 @@ class Plotter(QMainWindow):
             if self.update_timer:
                 self.update_timer.stop()
             if self.plot_widget:
+                plt.close(self.plot_widget.figure)
                 self.plot_container.removeWidget(self.plot_widget)
                 self.plot_widget.deleteLater()
             
@@ -7992,6 +8479,19 @@ class Plotter(QMainWindow):
         if self.plot_widget:
             self.plot_widget.set_overlay_color(index, color)
 
+    def _on_overlay_legend_changed(self, index: int, text: str):
+        """Update legend label for an overlay and refresh the plot."""
+        if self.plot_widget and hasattr(self.plot_widget, '_overlays'):
+            if 0 <= index < len(self.plot_widget._overlays):
+                self.plot_widget._overlays[index].legend_label = text
+                self.plot_widget.update_plot()
+
+    def _on_main_legend_changed(self, text: str):
+        """Update the main plot legend label and refresh the plot."""
+        if self.plot_widget:
+            self.plot_widget._main_legend_label = text
+            self.plot_widget.update_plot()
+
     def _on_overlay_drop(self, file_paths: List[str]):
         """Handle files dropped onto overlay container."""
         for file_path in file_paths:
@@ -8033,6 +8533,7 @@ class Plotter(QMainWindow):
         
         # Remove plot widget
         if self.plot_widget:
+            plt.close(self.plot_widget.figure)
             self.plot_container.removeWidget(self.plot_widget)
             self.plot_widget.deleteLater()
             self.plot_widget = None
@@ -8551,6 +9052,7 @@ class Plotter(QMainWindow):
             if self.update_timer:
                 self.update_timer.stop()
             if self.plot_widget:
+                plt.close(self.plot_widget.figure)
                 self.plot_container.removeWidget(self.plot_widget)
                 self.plot_widget.deleteLater()
             
@@ -9499,7 +10001,11 @@ class Plotter(QMainWindow):
 
     def load_file(self, file_path: str):
         ext = os.path.splitext(file_path)[1].lower()
-        
+
+        # Sync file explorer to the directory of the newly loaded file
+        self.file_explorer._set_root(
+            os.path.dirname(os.path.abspath(file_path)))
+
         if ext == '.dat':
             self._load_dat_file(file_path)
         elif ext in ('.h5', '.hdf5'):
@@ -9569,6 +10075,7 @@ class Plotter(QMainWindow):
         if self.update_timer:
             self.update_timer.stop()
         if self.plot_widget:
+            plt.close(self.plot_widget.figure)
             self.plot_container.removeWidget(self.plot_widget)
             self.plot_widget.deleteLater()
 
@@ -9663,6 +10170,7 @@ class Plotter(QMainWindow):
         if self.update_timer:
             self.update_timer.stop()
         if self.plot_widget:
+            plt.close(self.plot_widget.figure)
             self.plot_container.removeWidget(self.plot_widget)
             self.plot_widget.deleteLater()
 
@@ -9783,6 +10291,7 @@ class Plotter(QMainWindow):
             self.update_timer.stop()
         if self.data_source:
             self.data_source.close()
+        self._save_explorer_config()
         event.accept()
 
 

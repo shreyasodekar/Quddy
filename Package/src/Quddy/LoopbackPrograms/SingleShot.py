@@ -28,8 +28,8 @@ class SingleShotProgram(RAveragerProgram):
 
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="qubit",
-                       sigma=self.us2cycles(cfg['qubit']['sigma']),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 4)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length'] / 4),
+                       length=self.us2cycles(cfg['qubit']['pulse_length']))
 
         self.set_pulse_registers(ch=cfg['qubit']['channel'],
                                  style="arb",
@@ -53,7 +53,7 @@ class SingleShotProgram(RAveragerProgram):
     def body(self):
         cfg = self.cfg
         self.pulse(ch=cfg['qubit']['channel'])
-        self.sync_all(self.us2cycles(0.05))
+        self.sync_all()
 
         self.measure(pulse_ch=cfg['resonator']['channel'],
                      adcs=cfg['ADCs'],

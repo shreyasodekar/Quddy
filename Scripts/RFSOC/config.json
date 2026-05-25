@@ -1,27 +1,39 @@
-{"Sample Name": "Gatemon_v3.3_2-2",
- "Device Name": "Q4", 
- "ADCs": [1],
- "adc_trig_offset": 140,
- "qubit": {"channel": 0,
-           "nqz": 1,
-           "frequency":3504.604816675317,
-           "gain": 1200,
-           "phase": 0,
-           "pulse_length": 500,
-           "sigma": 0.02172358635635266,
-           "wait_time": 0.001},
- "readout_length": 500,
- "relax_delay": 25,
- "reps": 50000,
- "resonator": {"channel": 1,
-               "nqz": 2,
-               "frequency":8178.264529058116,
-               "gain": 7000,
-               "phase": 0,
-               "pulse_length": 200},
- "V_gate":  {"1": 0,
-             "2": 0,
-             "3": 0,
-             "4": -2800,
-             "5": 0,
-             "6": 0}}
+{
+    "Sample Name": "LL_Candle_qubit",
+    "Device Name": "Q1",
+    "ADCs": [
+        1
+    ],
+    "adc_trig_offset": 120,
+    "qubit": {
+        "channel": 0,
+        "nqz": 1,
+        "frequency": 3307.7432519531426,
+        "gain": 20000,
+        "phase": 0,
+        "pulse_length": 0.59323841492795,
+        "wait_time": 0.001,
+        "sync_time": 0.05,
+        "dephase_time": 1
+    },
+    "readout_length": 2000,
+    "relax_delay": 2000,
+    "reps": 1000,
+    "resonator": {
+        "channel": 1,
+        "nqz": 2,
+        "frequency": 7551.897897897898,
+        "gain": 2000,
+        "phase": 21,
+        "pulse_length": 1000
+    },
+    "V_gate": {
+        "1": 0,
+        "2": 0,
+        "3": 0,
+        "4": 0,
+        "5": 0,
+        "6": 0
+    },
+    "CPMG order": 900
+}

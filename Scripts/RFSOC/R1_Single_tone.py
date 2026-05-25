@@ -1,7 +1,9 @@
-from Package.src.Quddy.helper import generate_empty_snapshot_array
+# Pulse sequence
+# Q ------------
+# R ---|Measure|
+# Measure frequency is being sweep
 
-
-Use_Raverager = True
+Use_Raverager = False
 
 # Open the Config file
 pwd = os.path.dirname(__file__)
@@ -14,21 +16,21 @@ expname = 'R1_Single_tone'
 filename = get_unique_filename(path,expname, '.h5')
 config['Expt ID'] = filename.strip('.h5')
 
-expt_cfg = {'start': 8176,
-            'stop': 8181,
-            'points': 500
+expt_cfg = {'start': 7560, ## MHz. Pay attention to the NQZ used in the config
+            'stop': 7570,  ## MHz
+            'points': 1000
             }
 
 x_pts = helper.set_sweep(config, expt_cfg['start'], expt_cfg['stop'], expt_cfg['points'])
 data = generate_empty_nan_array(len(x_pts),0)
-snapshot = generate_empty_snapshot_array(len(x_pts),0)
+# snapshot = generate_empty_snapshot_array(len(x_pts),0)
 
 # Save data.
 f = h5py.File(path+'/'+filename, 'a', libver='latest')
 f.create_dataset('Metadata', data = json.dumps(config, indent = 4))
 f.create_dataset('Frequency', data = x_pts)
 f.create_dataset('S21', data = data)
-f.create_dataset('Fridge snapshot', data = snapshot)
+# f.create_dataset('Fridge snapshot', data = snapshot)
 f.swmr_mode = True
 
 switch.channels[0].switch(2)
@@ -36,12 +38,12 @@ switch.channels[1].switch(2)
 
 #Actual Measurement
 if Use_Raverager:
-    prog = LoopbackPrograms.ResonatorSpectroscopy.ResonatorSpectroscopyProgram(soccfg, config)
+    prog = ResonatorSpectroscopyProgram(soccfg, config)
     _, avgi, avgq = prog.acquire(soc, progress=True)
-    data = avgi[0,0]+1j*avgq[0,0]
+    data = avgi[0][0]+1j*avgq[0][0]
     f['S21'][:] = data
-    snapshot[:] = get_fridge_snapshot(Proteox)
-    f['Fridge snapshot'] = snapshot
+    # snapshot[:] = get_fridge_snapshot(Proteox)
+    # f['Fridge snapshot'] = snapshot
 else:
     for x in tqdm(range(len(x_pts))):
         config['resonator']['frequency'] = x_pts[x]
@@ -50,12 +52,9 @@ else:
         avgi, avgq = prog.acquire(soc, progress=False)
         data[x] = avgi[0][0]+1j*avgq[0][0]
         f['S21'][:] = data
-        snapshot[x] = get_fridge_snapshot(Proteox)
-        f['Fridge snapshot'] = snapshot
+        # snapshot[x] = get_fridge_snapshot(Proteox)
+        # f['Fridge snapshot'] = snapshot
         
-# popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[x_pts[np.argmin(np.abs(data))], -5, -40, 1] )
-# # popt, pcov = curve_fit(fitter.lorentzian, x_pts, np.abs(data), p0=[x_pts[np.argmin(np.abs(data))], -0.8, -0.2, 2] )
-
 # resonator = shunt.LinearShuntFitter(frequency=x_pts, data=data,
 #                               background_model=background.MagnitudeSlopeOffsetPhaseDelay())
 # print(r"The resonance frequency is f_r = {:.6e}".format(resonator.resonance_frequency))
@@ -63,25 +62,29 @@ else:
 # print("The total quality factor is Q_c = {:.0f}".format(resonator.Q_c))
 # print("The total quality factor is Q_t = {:.0f}".format(resonator.Q_t))
 
-# Plot results
-fig = plt.figure(figsize=(16,6))
-plt.subplot(121,title="Resonator Spectroscopy", xlabel="Frequency (MHz)", ylabel="Amp. (adc level)")
-plt.plot(x_pts, np.abs(data),'.-')
-# plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
-fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
-plt.savefig(path+'/'+filename.split('.')[0]+'.png')
-plt.show()
-print(x_pts[np.argmin(np.log10(np.abs(data))*10)])
-# print('Resonator frequency is ' + str(popt[0]) + ' MHz' )
-# print('FWHM is '+ str(abs(popt[3])) + ' MHz')
-
-# Save to docx
-savedoc = input('Save to Doc file? [y]/n : ')
-if savedoc == 'y' or savedoc == '':
-    picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
-    picture.Width = 500 #648 
-    picture.Height = 187.5 #243 
-    word.Selection.TypeText("\n")
-doc.Save()
+if show_plot:
+    # Plot results
+    # popt, pcov = curve_fit(fitter.lorentzian, x_pts, 10*np.log10(np.abs(data)), p0=[x_pts[np.argmin(np.abs(data))], -5, -40, 1] )
+    # # popt, pcov = curve_fit(fitter.lorentzian, x_pts, np.abs(data), p0=[x_pts[np.argmin(np.abs(data))], -0.8, -0.2, 2] )
+    fig = plt.figure(figsize=(16,6))
+    plt.subplot(121,title="Resonator Spectroscopy", xlabel="Frequency (MHz)", ylabel="Amp. (adc level)")
+    plt.plot(x_pts, np.abs(data),'.-')
+    # plt.plot(x_pts, fitter.lorentzian(x_pts, popt[0], popt[1], popt[2], popt[3]))
+    fig.text(0.6, 0,'Metadata: \n \n'+json.dumps(config, indent=4,separators = ('',' : ')).translate({ord(i): None for i in '{}"'}) , fontsize=10)
+    plt.savefig(path+'/'+filename.split('.')[0]+'.png')
+    plt.show()
+    print(x_pts[np.argmin(np.log10(np.abs(data))*10)])
+    # print('Resonator frequency is ' + str(popt[0]) + ' MHz' )
+    # print('FWHM is '+ str(abs(popt[3])) + ' MHz')
+    
+    if ask_save_to_doc:
+        # Save to docx
+        savedoc = input('Save to Doc file? [y]/n : ')
+        if savedoc == 'y' or savedoc == '':
+            word.Selection.TypeText("\n")
+            picture = selection.InlineShapes.AddPicture(path+'/'+filename.strip('.h5')+'.png')
+            picture.Width = 500 #648
+            picture.Height = 187.5 #243
+        doc.Save()
 
 f.close()

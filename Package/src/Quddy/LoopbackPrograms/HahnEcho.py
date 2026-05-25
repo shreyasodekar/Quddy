@@ -29,17 +29,17 @@ class HahnEchoProgram(RAveragerProgram):
         self.safe_regwi(self.q_rp, self.r_wait,
                         self.us2cycles(cfg['start']))
 
-        # Rx (π/2): half-sigma envelope
+        # Rx (π/2): half-pulse_length envelope
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="Rx",
-                       sigma=self.us2cycles(cfg['qubit']['sigma'] / 2),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 4 / 2)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length'] / (2*4)),
+                       length=self.us2cycles(cfg['qubit']['pulse_length'])/ 2)
 
-        # Ry (π): full-sigma envelope
+        # Ry (π): full-pulse_length envelope
         self.add_gauss(ch=cfg['qubit']['channel'],
                        name="Ry",
-                       sigma=self.us2cycles(cfg['qubit']['sigma']),
-                       length=self.us2cycles(cfg['qubit']['sigma']) * 4)
+                       sigma=self.us2cycles(cfg['qubit']['pulse_length']/4),
+                       length=self.us2cycles(cfg['qubit']['pulse_length']))
 
         self.default_pulse_registers(ch=cfg['qubit']['channel'],
                                      style="arb",

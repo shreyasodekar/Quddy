@@ -1,14 +1,18 @@
 {
-    "Sample Name": "Res-LL-2",
-    "Device Name": "R6",
+    "Sample Name": "LL_Candle_qubit",
+    "Device Name": "Q2",
+    "comments": "-",
     "pna": {
-        "power": -23,
+        "power": -50,
         "if_bandwidth": 3000.0,
-        "averages": 10
+        "averages": 1
     },
     "mxg": {
-        "power": 0
+        "power": -20
     },
+    "sc": {
+        "power": -20
+        },
     "V_gate": {
         "1": 0,
         "2": 0,

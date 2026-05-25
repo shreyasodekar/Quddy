@@ -1,21 +1,23 @@
 from qick import *
 
 
-class AmplitudeRabiProgram(RAveragerProgram):
-    """Amplitude Rabi — sweeps qubit pulse gain.
-
-    Sequence: qubit pulse (variable gain) — measure
+class DirectDispersiveMonitoring(RAveragerProgram):
+    """DirectDispersiveMonitoring — monitors the resonator response continuously. NO register is being swept.
+    RAveragerProgram is used to ensure the next shot is collected immediately after relay_delay us after one. Hence, sweep register is not set up and update is empty.
+    
+    Notes:
+        parameter   |         Purpose           |   OCS - Serniak et al.
+        relax_delay |  time betweem each shot   |   200 us
+        pulse_length|    integration time       |   4.16 us ~ 2600 Clock ticks
+        readout_length = pulse_length + buffer
 
     Additional cfg keys required:
-        cfg['start']  : sweep start gain (DAC units)
-        cfg['step']   : gain step size (DAC units)
         cfg['expts']  : number of sweep points
-        cfg['reps']   : averages per point
+        cfg['reps']   : 1 - Single shot measurement
     """
     def initialize(self):
         cfg = self.cfg
         self.declare_gen(ch=cfg['resonator']['channel'], nqz=cfg['resonator']['nqz'])
-        self.declare_gen(ch=cfg['qubit']['channel'],     nqz=cfg['qubit']['nqz'])
 
         for ch in cfg['ADCs']:
             self.declare_readout(ch=ch,
@@ -23,22 +25,9 @@ class AmplitudeRabiProgram(RAveragerProgram):
                                  freq=cfg['resonator']['frequency'],
                                  gen_ch=cfg['resonator']['channel'])
 
-        # --- sweep register setup (gain) ---
-        self.q_rp   = self.ch_page(cfg['qubit']['channel'])
-        self.r_gain = self.sreg(cfg['qubit']['channel'], 'gain')
-
-        self.add_gauss(ch=cfg['qubit']['channel'],
-                       name="qubit",
-                       sigma=self.us2cycles(cfg['qubit']['pulse_length']/4),
-                       length=self.us2cycles(cfg['qubit']['pulse_length']))
-
-        self.set_pulse_registers(ch=cfg['qubit']['channel'],
-                                 style="arb",
-                                 freq=self.freq2reg(cfg['qubit']['frequency'],
-                                        gen_ch=cfg['qubit']['channel']),
-                                 phase=self.deg2reg(cfg['qubit']['phase']),
-                                 gain=cfg['start'],
-                                 waveform="qubit")
+        # # --- sweep register setup ---
+        # self.r_rp   = self.ch_page(cfg['resonator']['channel'])
+        # self.r_freq = self.sreg(cfg['resonator']['channel'], 'freq')
 
         self.set_pulse_registers(ch=cfg['resonator']['channel'],
                                  style="const",
@@ -53,9 +42,6 @@ class AmplitudeRabiProgram(RAveragerProgram):
 
     def body(self):
         cfg = self.cfg
-        self.pulse(ch=cfg['qubit']['channel'])
-        self.sync_all(self.us2cycles(cfg['qubit']['wait_time']))
-
         self.measure(pulse_ch=cfg['resonator']['channel'],
                      adcs=cfg['ADCs'],
                      adc_trig_offset=cfg['adc_trig_offset'],
@@ -63,4 +49,7 @@ class AmplitudeRabiProgram(RAveragerProgram):
                      syncdelay=self.us2cycles(cfg['relax_delay']))
 
     def update(self):
-        self.mathi(self.q_rp, self.r_gain, self.r_gain, '+', self.cfg['step'])
+        # self.mathi(self.r_rp, self.r_freq, self.r_freq, '+',
+        #            self.freq2reg(self.cfg['step'],
+        #                          gen_ch=self.cfg['resonator']['channel']))
+        pass
